@@ -64,24 +64,30 @@ Full write-up: see [`methodology.md`](methodology.md).
 
 ## Findings
 
-Legend — **Confirmed**: working exploit reproduced · **Defense held**: attempted, blocked (documented
-negative finding) · **Defense-in-depth**: server accepts unsafe input but a safe client render
-neutralizes it · **Lab**: demonstrated in a self-authored isolated lab · **Academy**: PortSwigger lab.
+**Results at a glance:** seven working vulnerabilities were confirmed on OWASP Juice Shop — including an
+account-takeover-capable DOM XSS and four stored-XSS paths — plus advanced classes demonstrated in
+self-authored labs. One tested vector (an HTTP header XSS) was **correctly defended** by an allowlist
+sanitizer: a documented *negative* finding, and a sign that negative results matter too.
+
+Legend — **Confirmed**: working exploit reproduced · **Defense held**: attempted, blocked (negative
+finding) · **Defense-in-depth**: server accepts unsafe input but a safe client render neutralizes it ·
+**Lab**: demonstrated in a self-authored isolated lab · **Academy**: PortSwigger lab.
 
 | # | Vulnerability | Target | Status | Core mechanism |
 |---|---------------|--------|--------|----------------|
 | 1 | **DOM-based XSS** (search `?q=`) | Juice Shop | ✅ Confirmed | `q` flows into a `bypassSecurityTrustHtml` → `[innerHTML]` sink; `<img onerror>` executes on the resource-load-failure path (which the "inserted `<script>` won't run" rule doesn't cover) |
-| 2 | **SQL Injection** (product search `?q=`) | Juice Shop | ✅ Confirmed | `UNION SELECT` breaks out of the query and exfiltrates user emails + password hashes from the `Users` table |
-| 3 | **IDOR / BOLA** (`/rest/basket/{id}`) | Juice Shop | ✅ Confirmed | Server authenticates the token but does not verify object ownership; changing the basket id returns other users' baskets |
-| 4 | **Server-side sanitizer bypass** (feedback) | Juice Shop | ✅ Confirmed | A single-pass filter strips `<script>Foo</script>`; the deletion **re-forms** a valid `<iframe src=javascript:>` (mutation) |
-| 5 | **Zip Slip → Stored XSS** (subtitle) | Juice Shop | ✅ Confirmed | Path-traversal in a `.zip` upload overwrites `owasp_promo.vtt`; the `/promotion` page renders the subtitle unsanitized |
-| 6 | **HTTP Header XSS** (`True-Client-IP`) | Juice Shop | 🛡 Defense held | Header reaches `lastLoginIp`, but an **allowlist** sanitizer strips all dangerous tags — a well-configured defense (documented negative finding) |
-| 7 | **API-only stored input** (`/api/Products` `name`) | Juice Shop | 🧱 Defense-in-depth | Server stores unsanitized HTML in `name`, but the frontend renders it via Angular interpolation (`{{ name }}`) → auto-escaped, not triggered |
-| 8 | **CSP Bypass** (reflected XSS) | Academy | ✅ Solved | User input reflects into the CSP `report-uri`; injecting `;script-src-elem 'unsafe-inline'` re-opens inline script execution |
-| 9 | **mXSS (Mutation XSS)** | Local lab | ✅ Lab | Browser mutates `<image>` → `<img>` on an `innerHTML` round-trip, defeating a filter that only blocks `<img>` |
-| 10 | **DOM Clobbering** | Local lab | ✅ Lab | An `<a id="isAdmin">` element shadows a `window.isAdmin` global — access-control bypass with **zero script** |
-| 11 | **Prototype Pollution → XSS** | Local lab / Academy | ✅ Lab / Solved | `__proto__[x]=y` in a query string pollutes `Object.prototype`; a gadget then reaches an `innerHTML` sink |
-| 12 | **jQuery-specific XSS** | Local lab | ✅ Lab | `$(userInput)` selector-to-HTML, `.html()` sink, and `$.extend(true, …)` prototype pollution (CVE-2019-11358) on jQuery 3.3.1 |
+| 2 | **Stored XSS — sanitizer bypass** (feedback) | Juice Shop | ✅ Confirmed | A single-pass filter strips `<script>Foo</script>`; the deletion **re-forms** a valid `<iframe src=javascript:>` (mutation) |
+| 3 | **Stored XSS — Zip Slip** (subtitle overwrite) | Juice Shop | ✅ Confirmed | Path-traversal in a `.zip` upload overwrites `owasp_promo.vtt`; the `/promotion` page renders the subtitle unsanitized |
+| 4 | **Stored XSS — registration API → admin panel** | Juice Shop | ✅ Confirmed | Posting an `<iframe>` email straight to `/api/Users` skips client-side validation; the admin "Registered Users" table renders it raw |
+| 5 | **CSP Bypass** (profile page) | Juice Shop / Academy | ✅ Confirmed | User input is reflected into the CSP header; injecting a permissive `script-src` re-opens inline execution (also solved on the PortSwigger CSP lab) |
+| 6 | **SQL Injection** (product search `?q=`) | Juice Shop | ✅ Confirmed | `UNION SELECT` breaks out of the query and exfiltrates user emails + password hashes from the `Users` table |
+| 7 | **IDOR / BOLA** (`/rest/basket/{id}`) | Juice Shop | ✅ Confirmed | Server authenticates the token but does not verify object ownership; changing the basket id returns other users' baskets |
+| 8 | **HTTP Header XSS** (`True-Client-IP`) | Juice Shop | 🛡 Defense held | Header reaches `lastLoginIp`, but an **allowlist** sanitizer strips all dangerous tags — a well-configured defense (negative finding) |
+| 9 | **API input** (`/api/Products` `name`) | Juice Shop | 🧱 Defense-in-depth | Server stores unsanitized HTML in `name`, but the storefront renders it via Angular interpolation (`{{ name }}`) → auto-escaped, not triggered |
+| 10 | **mXSS (Mutation XSS)** | Local lab | ✅ Lab | Browser mutates `<image>` → `<img>` on an `innerHTML` round-trip, defeating a filter that only blocks `<img>` |
+| 11 | **DOM Clobbering** | Local lab | ✅ Lab | An `<a id="isAdmin">` element shadows a `window.isAdmin` global — access-control bypass with **zero script** |
+| 12 | **Prototype Pollution → XSS** | Local lab / Academy | ✅ Lab / Solved | `__proto__[x]=y` in a query string pollutes `Object.prototype`; a gadget then reaches an `innerHTML` sink |
+| 13 | **jQuery-specific XSS** | Local lab | ✅ Lab | `$(userInput)` selector-to-HTML, `.html()` sink, and `$.extend(true, …)` prototype pollution (CVE-2019-11358) on jQuery 3.3.1 |
 
 ---
 
@@ -140,4 +146,15 @@ steps taken, impact, and remediation.
 
 ---
 
-*Educational security research. Authorized/local targets only.*
+## Disclaimer & License
+
+This repository is for **education and defensive research only**. Every technique was performed on
+**authorized, local, intentionally-vulnerable** targets (OWASP Juice Shop, self-authored labs,
+PortSwigger Academy). Do **not** use any of it against systems you do not own or are not explicitly
+authorized to test — unauthorized testing is illegal.
+
+Released under the [MIT License](LICENSE).
+
+---
+
+*Educational security research · authorized/local targets only.*
