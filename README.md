@@ -133,6 +133,7 @@ xss-attack-defense-lab/
 ├── methodology.md     – the full source → sink hunting method
 ├── report/
 │   └── OWASP-JuiceShop-Security-Assessment.pdf   – full report (per-finding steps, impact, remediation)
+├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
 └── labs/              – self-authored, isolated labs for advanced XSS classes
     ├── mxss-lab.html
     ├── clobber-lab.html
@@ -143,6 +144,9 @@ xss-attack-defense-lab/
 📄 **Full report:** [`report/OWASP-JuiceShop-Security-Assessment.pdf`](report/OWASP-JuiceShop-Security-Assessment.pdf)
 — executive summary, methodology, and each finding with vulnerability class, how it works, the exact
 steps taken, impact, and remediation.
+
+📸 **Evidence:** selected captures in [`screenshots/`](screenshots/) (solved challenges, Burp Repeater,
+HTTP history, profile/CSP fields).
 
 ---
 
