@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<!-- YEREL jQuery guvenlik labi - egitim. jQuery 3.3.1 KASITLI eski/zafiyetli surum. -->
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>jQuery XSS + Pollution Lab</title>
+<script src="https://code.jquery.com/jquery-3.3.1.min.js"></script>
+<style>
+  body{font-family:system-ui,Arial;max-width:900px;margin:20px auto;background:#111;color:#eee}
+  input{width:100%;font-family:monospace;font-size:14px;background:#000;color:#0f0;border:1px solid #444;padding:8px;box-sizing:border-box}
+  button{padding:8px 16px;margin:8px 0;cursor:pointer;font-size:14px}
+  .box{border:1px solid #444;padding:12px;margin:14px 0;background:#1a1a1a}
+  .label{color:#fc6;font-size:13px;text-transform:uppercase;letter-spacing:1px;font-weight:bold}
+  pre{white-space:pre-wrap;word-break:break-all;margin:6px 0;font-size:14px}
+  .bad{color:#f66;font-weight:bold}.ok{color:#6f6}
+  .sink{border:1px dashed #555;padding:8px;background:#000;min-height:16px;margin-top:6px}
+  code{background:#000;padding:2px 4px;color:#9cf}
+  p{color:#bbb;font-size:14px}
+</style>
+</head>
+<body>
+<h2>jQuery Guvenlik Labi <span style="color:#888;font-size:14px">(jQuery <span id="ver"></span> — kasitli eski)</span></h2>
+<p id="warn" style="color:#f66"></p>
+
+<!-- ============ A ============ -->
+<div class="box">
+  <div class="label">A) $(kullanici_girdisi) — SELECTOR XSS</div>
+  <p>jQuery <code>$()</code>, "&lt;" ile baslayan string'i <b>HTML sanar ve element YARATIR</b>. Cogu gelistirici
+  <code>$(x)</code>'in sadece "sectigini" saniyor — ama x HTML ise <b>olusturur</b>. Ornek: <code>$(location.hash)</code>.</p>
+  <input id="inA" value="<img src=x onerror=console.log('jQ-A-FIRED')>">
+  <button onclick="runA()">$( input ) calistir</button>
+  <div id="sinkA" class="sink"></div>
+</div>
+
+<!-- ============ B ============ -->
+<div class="box">
+  <div class="label">B) .html(kullanici_girdisi) — innerHTML tarzi SINK</div>
+  <p><code>.html()</code> = <code>innerHTML</code>. Ham HTML basar. <code>.text()</code> guvenli olurdu.</p>
+  <input id="inB" value="<img src=x onerror=console.log('jQ-B-FIRED')>">
+  <button onclick="runB()">.html( input ) calistir</button>
+  <div id="sinkB" class="sink"></div>
+</div>
+
+<!-- ============ C ============ -->
+<div class="box">
+  <div class="label">C) $.extend(true, {}, JSON) — PROTOTYPE POLLUTION (CVE-2019-11358)</div>
+  <p>jQuery &lt; 3.4.0'in derin merge'i <code>__proto__</code> anahtarini engellemez. Az once ogrendigin
+  prototype pollution — burada gercek bir kutuphanede.</p>
+  <input id="inC" value='{"__proto__":{"polluted":"EVET-KIRLENDI"}}'>
+  <button onclick="runC()">$.extend(true, {}, input) merge et</button>
+  <pre id="outC"></pre>
+</div>
+
+<script>
+if (typeof jQuery === 'undefined') {
+  document.getElementById('warn').textContent =
+    'jQuery YUKLENEMEDI — internet baglantisi gerekli (CDN). Baglaniyi ac, sayfayi yenile.';
+} else {
+  document.getElementById('ver').textContent = jQuery.fn.jquery;
+}
+
+function runA(){
+  var s = document.getElementById('inA').value;
+  // ZAFIYET: kullanici girdisini dogrudan $()'a vermek
+  var el = $(s);                       // <-- string HTML sanilir -> element yaratilir -> onerror FIRE
+  $('#sinkA').empty().append(el);
+  console.log('A: $(input) calisti. s =', s);
+}
+
+function runB(){
+  var s = document.getElementById('inB').value;
+  $('#sinkB').html(s);                 // <-- .html() = innerHTML SINK
+  console.log('B: .html(input) calisti.');
+}
+
+function runC(){
+  var s = document.getElementById('inC').value;
+  var out = document.getElementById('outC');
+  try {
+    var obj = JSON.parse(s);
+    $.extend(true, {}, obj);           // <-- guard'siz derin merge -> Object.prototype kirlenir
+    var probe = ({}).polluted;         // taze bos nesne bile miras alir
+    if (probe === undefined){ out.textContent = 'undefined  (temiz)'; out.className='ok'; }
+    else { out.textContent = 'KIRLI!  ({}).polluted = ' + JSON.stringify(probe); out.className='bad'; }
+    console.log('C: $.extend sonrasi ({}).polluted =', probe);
+  } catch(e){
+    out.textContent = 'JSON hatasi: ' + e.message;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<!-- YEREL mXSS ÖĞRENME LABI - sadece eğitim, lokal dosya -->
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>mXSS Lab</title>
+<style>
+  body{font-family:system-ui,Arial;max-width:900px;margin:20px auto;background:#111;color:#eee}
+  textarea{width:100%;height:70px;font-family:monospace;font-size:14px;background:#000;color:#0f0;border:1px solid #444;padding:8px}
+  button{padding:8px 16px;margin:8px 0;cursor:pointer;font-size:14px}
+  .box{border:1px solid #444;padding:10px;margin:10px 0;background:#1a1a1a}
+  .label{color:#888;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+  pre{white-space:pre-wrap;word-break:break-all;color:#9cf;margin:6px 0}
+  #mut{font-weight:bold;font-size:16px}
+  .same{color:#6f6}.diff{color:#f66}
+  #sink{border:1px dashed #666;padding:10px;min-height:24px;background:#000}
+</style>
+</head>
+<body>
+<h2>mXSS Mini-Lab — innerHTML round-trip izleyici</h2>
+<p class="label">1) HTML string'ini buraya yaz</p>
+<textarea id="in">&lt;b&gt;hello</textarea>
+<button onclick="inject()">Inject (innerHTML'e ata)</button>
+
+<div class="box">
+  <div class="label">2) SENİN GİRDİĞİN string (parser'a giren)</div>
+  <pre id="before"></pre>
+</div>
+
+<div class="box">
+  <div class="label">3) TARAYICININ ürettiği DOM (görsel render)</div>
+  <div id="sink"></div>
+</div>
+
+<div class="box">
+  <div class="label">4) DOM'un YENİDEN serialize ettiği string (parser'dan çıkan)</div>
+  <pre id="after"></pre>
+</div>
+
+<div class="box">
+  <div class="label">5) SONUÇ</div>
+  <pre id="mut"></pre>
+</div>
+
+<script>
+function inject(){
+  const s = document.getElementById('in').value;   // senin string'in
+  const sink = document.getElementById('sink');
+  sink.innerHTML = s;                               // <-- SINK: string -> DOM (1. parse)
+  const after = sink.innerHTML;                     // <-- DOM -> string (yeniden serialize)
+  document.getElementById('before').textContent = s;
+  document.getElementById('after').textContent = after;
+  const m = document.getElementById('mut');
+  if (s === after) {
+    m.textContent = 'AYNI — mutasyon YOK. Sanitizer ile tarayici ayni seyi goruyor.';
+    m.className = 'same';
+  } else {
+    m.textContent = 'FARKLI — MUTASYON OLDU! Sanitizer ile parser ayni string-i gormuyor.';
+    m.className = 'diff';
+  }
+  console.log('GIRDI :', JSON.stringify(s));
+  console.log('CIKTI :', JSON.stringify(after));
+}
+inject();
+</script>
+</body>
+</html>

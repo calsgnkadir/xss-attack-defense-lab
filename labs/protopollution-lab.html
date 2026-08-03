@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<!-- YEREL Prototype Pollution ogrenme labi - egitim, lokal dosya -->
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>Prototype Pollution Lab</title>
+<style>
+  body{font-family:system-ui,Arial;max-width:900px;margin:20px auto;background:#111;color:#eee}
+  input{width:100%;font-family:monospace;font-size:14px;background:#000;color:#0f0;border:1px solid #444;padding:8px;box-sizing:border-box}
+  button{padding:8px 16px;margin:8px 0;cursor:pointer;font-size:14px}
+  .box{border:1px solid #444;padding:10px;margin:10px 0;background:#1a1a1a}
+  .label{color:#888;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+  pre{white-space:pre-wrap;word-break:break-all;margin:6px 0;font-size:14px;color:#9cf}
+  .bad{color:#f66;font-weight:bold}.ok{color:#6f6}
+  #sink{border:1px dashed #555;padding:8px;background:#000;color:#8f8;min-height:18px}
+  code{background:#000;padding:2px 4px;color:#9cf}
+</style>
+</head>
+<body>
+<h2>Prototype Pollution -&gt; XSS Mini-Lab</h2>
+<p>Query string'i URL'ye koyacagiz (bu <b>agdan giden</b> kisim). Zafiyetli parser onu bir nesneye kopyalar;
+<code>__proto__</code> anahtarini engellemedigi icin <code>Object.prototype</code> kirlenir. Sonra masum bir
+<b>gadget</b> (varsayilan bekleyen kod) o kirli degeri bir <b>sink</b>'e (innerHTML) akitir.</p>
+
+<p class="label">Query string yaz (basina ? koyma):</p>
+<input id="q" value="__proto__[widgetHtml]=POLLUTED-VALUE">
+<button onclick="location.search=document.getElementById('q').value">URL'ye koy &amp; yeniden yukle</button>
+<button onclick="location.search=''">Temizle (reload)</button>
+
+<div class="box"><div class="label">1) Mevcut query (location.search) — istekte giden kisim</div><pre id="qs"></pre></div>
+<div class="box"><div class="label">2) Object.prototype kirli mi? ({}).widgetHtml</div><pre id="poll"></pre></div>
+<div class="box"><div class="label">3) GADGET -&gt; SINK ciktisi (config.widgetHtml || 'varsayilan')</div><div id="sink"></div></div>
+
+<script>
+// ================= ZAFIYETLI QUERY PARSER (guard YOK) =================
+function setNested(obj, path, val){
+  var cur = obj;
+  for (var i=0; i<path.length-1; i++){
+    if (!(path[i] in cur)) cur[path[i]] = {};
+    cur = cur[path[i]];            // path[i]==='__proto__' ise cur = Object.prototype  (!)
+  }
+  cur[path[path.length-1]] = val;  // ...ve buraya yazinca prototype kirlenir
+}
+function parseQuery(qs){
+  var obj = {};
+  qs.replace(/^\?/,'').split('&').forEach(function(pair){
+    if(!pair) return;
+    var eq = pair.indexOf('=');
+    var rawKey = decodeURIComponent(eq>=0 ? pair.slice(0,eq) : pair);
+    var val    = eq>=0 ? decodeURIComponent(pair.slice(eq+1)) : '';
+    var path = rawKey.replace(/\]/g,'').split('[');   // a[b][c] -> ['a','b','c']
+    setNested(obj, path, val);
+  });
+  return obj;
+}
+
+// --- calistir ---
+document.getElementById('qs').textContent = location.search || '(bos)';
+var userData = parseQuery(location.search);           // <-- KIRLETME burada olabilir
+
+// ================= MASUM GADGET (varsayilan bekleyen kod) =================
+var config = {};                                      // TAZE nesne, hic widgetHtml koymadik
+var widget = config.widgetHtml || 'Varsayilan widget (temiz)';  // ama miras yoluyla kirli deger gelir!
+document.getElementById('sink').innerHTML = widget;   // SINK
+
+// --- rapor ---
+var p = document.getElementById('poll');
+var probe = ({}).widgetHtml;                          // taze bos nesne bile kirli degeri miras alir
+if (probe === undefined){ p.textContent = 'undefined  (temiz, kirlenme yok)'; p.className='ok'; }
+else { p.textContent = 'KIRLI!  ({}).widgetHtml = ' + JSON.stringify(probe); p.className='bad'; }
+
+console.log('location.search =', location.search);
+console.log('({}).widgetHtml =', ({}).widgetHtml);
+</script>
+</body>
+</html>
