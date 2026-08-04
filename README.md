@@ -91,6 +91,29 @@ finding) · **Defense-in-depth**: server accepts unsafe input but a safe client 
 
 ---
 
+## Evidence
+
+Selected captures — the full per-finding walkthrough (payloads, steps, remediation) is in the
+[report](report/OWASP-JuiceShop-Security-Assessment.pdf).
+
+**OWASP Juice Shop Score Board** — solved challenges including *Login Admin*, *Password Strength*
+(SQL Injection / weak credentials) and *View Basket* (IDOR):
+
+![OWASP Juice Shop Score Board with solved Login Admin, Password Strength and View Basket challenges](screenshots/01-scoreboard-solved-challenges.jpg)
+
+**Burp Suite Repeater** — editing and resending a request during header / API injection testing:
+
+![Burp Suite Repeater request and response panels during injection testing](screenshots/03-burp-repeater-injection-testing.jpg)
+
+**Burp Proxy HTTP history** — locating the target requests (`/rest/saveLoginIp`, `/api/*`) before
+replaying them in Repeater:
+
+![Burp Proxy HTTP history list showing captured Juice Shop requests](screenshots/04-burp-http-history.jpg)
+
+More captures in [`screenshots/`](screenshots/).
+
+---
+
 ## Key insights
 
 - **The render decides, not the response.** Seeing raw HTML in an HTTP response does *not* mean XSS
