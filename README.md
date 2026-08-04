@@ -64,14 +64,13 @@ Full write-up: see [`methodology.md`](methodology.md).
 
 ## Findings
 
-**Results at a glance:** seven working vulnerabilities were confirmed on OWASP Juice Shop — including an
-account-takeover-capable DOM XSS and four stored-XSS paths — plus advanced classes demonstrated in
-self-authored labs. One tested vector (an HTTP header XSS) was **correctly defended** by an allowlist
-sanitizer: a documented *negative* finding, and a sign that negative results matter too.
+**Results at a glance:** eight working vulnerabilities were confirmed on OWASP Juice Shop — an
+account-takeover-capable DOM XSS, four stored-XSS paths (feedback, Zip Slip, registration API, and a
+header-based one), a CSP bypass, SQL Injection and an IDOR — plus advanced classes demonstrated in
+self-authored labs.
 
-Legend — **Confirmed**: working exploit reproduced · **Defense held**: attempted, blocked (negative
-finding) · **Defense-in-depth**: server accepts unsafe input but a safe client render neutralizes it ·
-**Lab**: demonstrated in a self-authored isolated lab · **Academy**: PortSwigger lab.
+Legend — **Confirmed**: working exploit reproduced · **Lab**: demonstrated in a self-authored isolated
+lab · **Academy**: PortSwigger lab.
 
 | # | Vulnerability | Target | Status | Core mechanism |
 |---|---------------|--------|--------|----------------|
@@ -82,12 +81,11 @@ finding) · **Defense-in-depth**: server accepts unsafe input but a safe client 
 | 5 | **CSP Bypass** (profile page) | Juice Shop / Academy | ✅ Confirmed | User input is reflected into the CSP header; injecting a permissive `script-src` re-opens inline execution (also solved on the PortSwigger CSP lab) |
 | 6 | **SQL Injection** (product search `?q=`) | Juice Shop | ✅ Confirmed | `UNION SELECT` breaks out of the query and exfiltrates user emails + password hashes from the `Users` table |
 | 7 | **IDOR / BOLA** (`/rest/basket/{id}`) | Juice Shop | ✅ Confirmed | Server authenticates the token but does not verify object ownership; changing the basket id returns other users' baskets |
-| 8 | **HTTP Header XSS** (`True-Client-IP`) | Juice Shop | 🛡 Defense held | Header reaches `lastLoginIp`, but an **allowlist** sanitizer strips all dangerous tags — a well-configured defense (negative finding) |
-| 9 | **API input** (`/api/Products` `name`) | Juice Shop | 🧱 Defense-in-depth | Server stores unsanitized HTML in `name`, but the storefront renders it via Angular interpolation (`{{ name }}`) → auto-escaped, not triggered |
-| 10 | **mXSS (Mutation XSS)** | Local lab | ✅ Lab | Browser mutates `<image>` → `<img>` on an `innerHTML` round-trip, defeating a filter that only blocks `<img>` |
-| 11 | **DOM Clobbering** | Local lab | ✅ Lab | An `<a id="isAdmin">` element shadows a `window.isAdmin` global — access-control bypass with **zero script** |
-| 12 | **Prototype Pollution → XSS** | Local lab / Academy | ✅ Lab / Solved | `__proto__[x]=y` in a query string pollutes `Object.prototype`; a gadget then reaches an `innerHTML` sink |
-| 13 | **jQuery-specific XSS** | Local lab | ✅ Lab | `$(userInput)` selector-to-HTML, `.html()` sink, and `$.extend(true, …)` prototype pollution (CVE-2019-11358) on jQuery 3.3.1 |
+| 8 | **Stored XSS — HTTP header** (`True-Client-IP`) | Juice Shop | ✅ Confirmed | Header reaches `lastLoginIp` behind an allowlist sanitizer; a **nested-tag mutation** (same technique as #2) bypasses it and the payload fires on the Last Login IP page |
+| 9 | **mXSS (Mutation XSS)** | Local lab | ✅ Lab | Browser mutates `<image>` → `<img>` on an `innerHTML` round-trip, defeating a filter that only blocks `<img>` |
+| 10 | **DOM Clobbering** | Local lab | ✅ Lab | An `<a id="isAdmin">` element shadows a `window.isAdmin` global — access-control bypass with **zero script** |
+| 11 | **Prototype Pollution → XSS** | Local lab / Academy | ✅ Lab / Solved | `__proto__[x]=y` in a query string pollutes `Object.prototype`; a gadget then reaches an `innerHTML` sink |
+| 12 | **jQuery-specific XSS** | Local lab | ✅ Lab | `$(userInput)` selector-to-HTML, `.html()` sink, and `$.extend(true, …)` prototype pollution (CVE-2019-11358) on jQuery 3.3.1 |
 
 ---
 
@@ -121,11 +119,11 @@ More captures in [`screenshots/`](screenshots/).
   `<b>` in reviews, yet Angular auto-escapes it on render → safe. Conversely the search sink opts out
   of escaping (`bypassSecurityTrustHtml`) → exploitable.
 - **Filtering alone is not protection.** A blacklist/single-pass sanitizer can be defeated because
-  *removing* a tag can re-form a new dangerous one (finding #4). Real protection is output encoding +
-  a tested DOM-based sanitizer (DOMPurify / sanitize-html) + recursive sanitization + CSP.
-- **Server weakness ≠ exploit.** A server that stores unsafe input is a real flaw, but a safe client
-  render can neutralize it today (finding #7) — defense-in-depth in action. The flaw still belongs in
-  a report because a different consumer could render it unsafely tomorrow.
+  *removing* a tag can re-form a new dangerous one (findings #2 and #8). Real protection is output
+  encoding + a tested DOM-based sanitizer (DOMPurify / sanitize-html) + recursive sanitization + CSP.
+- **Client-side validation is not security.** The registration-API XSS (finding #4) skips the form's
+  checks entirely by posting straight to the API — validation must be enforced, and output encoded, on
+  the server.
 - **`<script>` inserted via `innerHTML` does not execute** — escalation needs an event-handler
   attribute (`onerror`) or a `javascript:` URL scheme, a different code path.
 
