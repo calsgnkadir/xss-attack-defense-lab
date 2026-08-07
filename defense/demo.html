@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<!-- EDUCATIONAL defense demo. Open directly in a browser (file://). Local, offline, safe. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sanitiser Attack &amp; Defense Demo</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Arial,sans-serif;max-width:1000px;margin:24px auto;padding:0 16px;color:#1a2230;background:#f4f6f8;line-height:1.5}
+  h1{font-size:22px;margin:.2em 0}
+  p.lede{color:#5b6472}
+  textarea{width:100%;min-height:64px;font-family:ui-monospace,Consolas,monospace;font-size:13px;padding:8px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box}
+  button{padding:8px 14px;margin:8px 6px 8px 0;border:0;border-radius:8px;background:#0e7490;color:#fff;font-size:14px;cursor:pointer}
+  button.secondary{background:#64748b}
+  .row{display:flex;gap:16px;flex-wrap:wrap}
+  .panel{flex:1;min-width:320px;background:#fff;border:1px solid #d7dee7;border-radius:12px;padding:14px}
+  .panel h2{font-size:15px;margin:0 0 4px}
+  .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
+  .tag.bad{background:#f8e3df;color:#b42318}.tag.good{background:#e4f3e8;color:#15803d}
+  .lbl{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#5b6472;font-weight:700;margin:10px 0 3px}
+  pre{background:#0f1826;color:#dbe6f2;padding:8px;border-radius:8px;font-size:12px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:0}
+  .render{border:1px dashed #94a3b8;border-radius:8px;padding:10px;min-height:24px;background:#fafcfe}
+  .status{margin-top:10px;font-weight:700;font-size:13px}
+  .status.bad{color:#b42318}.status.good{color:#15803d}
+  #log{margin-top:14px;background:#fff;border:1px solid #d7dee7;border-radius:10px;padding:10px;font-size:13px;min-height:20px}
+  code{background:#eef1f6;padding:1px 5px;border-radius:5px;font-family:ui-monospace,Consolas,monospace}
+</style>
+</head>
+<body>
+<h1>Sanitiser Attack &amp; Defense Demo</h1>
+<p class="lede">The same payload is fed to two sanitisers, then written to the page with
+<code>innerHTML</code>. The <b>blocklist</b> one lets it execute; the <b>allowlist</b> one does not.
+This is the defensive side of the assessment (see the report's Findings 2 and 8).</p>
+
+<div class="lbl">Payload (edit freely)</div>
+<textarea id="payload">&lt;img src=x onerror="xssProof(this)"&gt;</textarea>
+<div>
+  <button onclick="run()">Run both renderers</button>
+  <button class="secondary" onclick="reset()">Reset</button>
+</div>
+
+<div class="row">
+  <div class="panel" data-name="Vulnerable (blocklist)">
+    <h2>Vulnerable <span class="tag bad">blocklist + single pass</span></h2>
+    <div class="lbl">Sanitiser output (string)</div><pre id="a-out"></pre>
+    <div class="lbl">Rendered via innerHTML</div><div class="render" id="a-render"></div>
+    <div class="status good" id="a-status">✓ not run yet</div>
+  </div>
+  <div class="panel" data-name="Secure (allowlist)">
+    <h2>Secure <span class="tag good">allowlist parse</span></h2>
+    <div class="lbl">Sanitiser output (string)</div><pre id="b-out"></pre>
+    <div class="lbl">Rendered via innerHTML</div><div class="render" id="b-render"></div>
+    <div class="status good" id="b-status">✓ not run yet</div>
+  </div>
+</div>
+
+<div id="log">Ready. Click <b>Run both renderers</b>. The default payload only <em>reports</em>
+execution (no alert popups).</div>
+
+<script src="vulnerable-sanitizer.js"></script>
+<script src="secure-sanitizer.js"></script>
+<script>
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function log(m){document.getElementById('log').innerHTML=m;}
+
+// The default payload calls this when it executes, so we can prove XSS without alert() modals.
+window.xssProof=function(el){
+  const panel=el&&el.closest?el.closest('.panel'):null;
+  const name=panel?panel.dataset.name:'unknown';
+  if(panel){const s=panel.querySelector('.status');s.textContent='⚠ Script EXECUTED — this is XSS';s.className='status bad';}
+  log('The payload executed inside the <b>'+esc(name)+'</b> renderer.');
+};
+
+function reset(){
+  for(const p of ['a','b']){
+    document.getElementById(p+'-out').textContent='';
+    document.getElementById(p+'-render').innerHTML='';
+    const s=document.getElementById(p+'-status');s.textContent='✓ not run yet';s.className='status good';
+  }
+  log('Reset.');
+}
+
+function run(){
+  reset();
+  const input=document.getElementById('payload').value;
+
+  // Vulnerable: blocklist, then innerHTML (dangerous)
+  const aClean=vulnerableSanitize(input);
+  document.getElementById('a-out').textContent=aClean;
+  document.getElementById('a-render').innerHTML=aClean; // <-- the vulnerable sink
+
+  // Secure: allowlist parse, then innerHTML (safe, because the dangerous parts are gone)
+  const bClean=allowlistSanitize(input);
+  document.getElementById('b-out').textContent=bClean;
+  document.getElementById('b-render').innerHTML=bClean;
+
+  // The vulnerable panel's onerror fires asynchronously and flips its status to red.
+  // The secure panel keeps its green "no script executed" status.
+  setTimeout(()=>{
+    const sb=document.getElementById('b-status');
+    if(sb.classList.contains('good')) sb.textContent='✓ No script executed — safe';
+    const sa=document.getElementById('a-status');
+    if(sa.classList.contains('good')){sa.textContent='(no execution — try the default <img onerror> payload)';}
+  },150);
+}
+</script>
+</body>
+</html>

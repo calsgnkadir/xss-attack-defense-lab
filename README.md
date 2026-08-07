@@ -25,7 +25,8 @@ step, not just paste a payload.
   results (working exploits) and *negative* results (where a defense held — also a valid finding).
 - Self-authored **local labs** that isolate advanced/"next-gen" XSS classes that Juice Shop does not
   expose (see [`labs/`](labs/)).
-- A clear link between **attack** and **defense**: each finding is paired with a remediation.
+- A clear link between **attack** and **defense**: each finding is paired with a remediation, plus an
+  interactive [`defense/`](defense/) demo — a bypassable blocklist filter vs. a safe allowlist, side by side.
 
 ---
 
@@ -155,6 +156,7 @@ xss-attack-defense-lab/
 ├── report/
 │   └── OWASP-JuiceShop-Security-Assessment.pdf   – full report (per-finding steps, impact, remediation)
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
+├── defense/           – interactive attack-vs-defense sanitiser demo (open defense/demo.html)
 └── labs/              – self-authored, isolated labs for advanced XSS classes
     ├── mxss-lab.html
     ├── clobber-lab.html
