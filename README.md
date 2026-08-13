@@ -27,6 +27,9 @@ step, not just paste a payload.
   expose (see [`labs/`](labs/)).
 - A clear link between **attack** and **defense**: each finding is paired with a remediation, and
   [`defense/`](defense/) collects the secure-coding fix for every class in one place.
+- **Independent, real-world research** applying the same method to third-party open-source software,
+  with externally-validated results and coordinated disclosure (see
+  [`research/`](research/) — *Beyond the Lab*).
 
 ---
 
@@ -113,6 +116,22 @@ More captures in [`screenshots/`](screenshots/).
 
 ---
 
+## Beyond the lab — real-world research
+
+The lab work above builds the fundamentals; I then applied the **same source → sink discipline to real
+third-party open-source software** (WordPress.org plugins) — reading code for logic and access-control
+flaws, patch-diffing recent fixes to find the variants a developer missed, and **verifying every
+hypothesis in a local Dockerized environment** before believing it.
+
+That research **independently produced externally-validated findings** — including a Broken-Access-Control
+vulnerability confirmed as genuine by **Patchstack** (a CVE Numbering Authority), and a SQL-injection
+variant, re-derived via patch-diffing, that was subsequently published as a CVE.
+
+All of it on **public open-source code, verified only in local labs, disclosed responsibly** — no
+unpatched details are published. Full methodology and honest results: [`research/`](research/).
+
+---
+
 ## Key insights
 
 - **The render decides, not the response.** Seeing raw HTML in an HTTP response does *not* mean XSS
@@ -153,6 +172,7 @@ More captures in [`screenshots/`](screenshots/).
 xss-attack-defense-lab/
 ├── README.md          – this file
 ├── methodology.md     – the full source → sink hunting method
+├── research/          – Beyond the Lab: independent real-world research + validated results
 ├── report/
 │   └── OWASP-JuiceShop-Security-Assessment.pdf   – full report (per-finding steps, impact, remediation)
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
