@@ -1,25 +1,37 @@
-# dxa — DOM XSS source→sink analyzer
+# dxa — source→sink XSS analyzer (full-stack)
 
-A small, dependency-free static linter that flags **DOM-based XSS** sources,
-sinks, and the likely **source → sink flows** between them in JavaScript. It is
-the `source → sink` methodology from this repository
+A small, dependency-free static linter that flags XSS sources, sinks, and the
+likely **source → sink flows** between them — on **both sides** of a web app:
+
+- **client side** — JavaScript / TypeScript (DOM XSS)
+- **server side** — C# / ASP.NET & Razor (server-rendered XSS)
+
+It is the `source → sink` methodology from this repository
 ([`../../methodology.md`](../../methodology.md)) expressed as runnable code.
 
 ## What it does
 
-1. **Finds sinks** — `innerHTML`/`outerHTML`, `insertAdjacentHTML`,
-   `document.write`, `eval`, the `Function()` constructor, string `setTimeout`,
-   jQuery `.html()`/`.append()`, `$()` on a variable, `location`/`window.open`
-   navigation, `setAttribute` on dangerous attributes, Angular
-   `bypassSecurityTrust*`, React `dangerouslySetInnerHTML`.
-2. **Finds sources** — `location.hash`/`.search`/`.href`, `document.URL`,
-   `document.referrer`, `window.name`, `document.cookie`, web storage, URL
-   params, `history.state`, and `postMessage` data (only in files that register
-   a `message` listener).
-3. **Taint pass** — a bounded fix-point marks variables assigned from a source
-   (or from another tainted variable) as tainted. A sink that consumes a tainted
-   value, or a source directly, is raised to **HIGH confidence**; a sink on a
-   dynamic-but-untraced value is **medium**; a sink on a pure literal is **low**.
+1. **Finds sinks.**
+   - *JavaScript:* `innerHTML`/`outerHTML`, `insertAdjacentHTML`,
+     `document.write`, `eval`, the `Function()` constructor, string `setTimeout`,
+     jQuery `.html()`/`.append()`, `$()` on a variable, `location`/`window.open`
+     navigation, `setAttribute` on dangerous attributes, Angular
+     `bypassSecurityTrust*`, React `dangerouslySetInnerHTML`.
+   - *C# / .NET:* `@Html.Raw()`, `Response.Write()`, `new HtmlString()` /
+     `MvcHtmlString`, Blazor `MarkupString`, control `.InnerHtml`.
+2. **Finds sources.**
+   - *JavaScript:* `location.hash`/`.search`/`.href`, `document.URL`,
+     `document.referrer`, `window.name`, `document.cookie`, web storage, URL
+     params, `history.state`, `postMessage` data (in files with a `message`
+     listener).
+   - *C# / .NET:* `Request.Query`/`Form`/`Params`/`Cookies`/`Headers`/`Body`,
+     route values.
+3. **Taint pass (JS).** A bounded fix-point marks variables assigned from a
+   source (or from another tainted variable) as tainted. A sink that consumes a
+   tainted value, or a source directly, is raised to **HIGH confidence**; a sink
+   on a dynamic-but-untraced value is **medium**; a sink on a pure literal is
+   **low**. (C# is sink-detection with source-on-line confidence; no cross-line
+   taint — kept deliberately simple and honest.)
 
 ## Usage
 

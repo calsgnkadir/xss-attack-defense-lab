@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-dxa - DOM XSS source-to-sink analyzer.
+dxa - a source-to-sink XSS analyzer for full-stack code.
 
-A heuristic static linter that flags DOM-based XSS *sources*, *sinks*, and the
-likely *source -> sink* flows between them in JavaScript. It is the source->sink
-methodology documented in this repository, expressed as code.
+A heuristic static linter that flags XSS *sources*, *sinks*, and the likely
+*source -> sink* flows between them, on both sides of a web app:
 
-What it does
-------------
-1. Finds dangerous sinks   (innerHTML, document.write, eval, jQuery .html(), ...)
-2. Finds attacker-controllable sources (location.hash, document.referrer, ...)
-3. Runs a lightweight taint propagation: variables assigned from a source are
-   marked tainted, and any sink that consumes a tainted value (or a source
-   directly) is raised to HIGH confidence.
+  * client side  - JavaScript / TypeScript (DOM XSS)
+  * server side  - C# / ASP.NET & Razor (server-rendered XSS)
+
+It is the source->sink methodology documented in this repository, expressed as
+code. For JavaScript it also runs a light taint pass so a variable assigned from
+a source and later used in a sink is raised to HIGH confidence.
 
 What it is NOT
 --------------
-This is a *heuristic* built on regular expressions plus a small taint pass, not a
-sound program analysis. It does not build a real AST or a precise data-flow
-graph, so it produces false positives (matches inside comments/strings) and false
-negatives (taint through function calls, aliasing, complex expressions). Treat the
-output as a prioritized triage list, then confirm each finding by hand.
+A *heuristic* built on regular expressions (plus a small taint pass for JS), not
+a sound program analysis. No AST, no precise data-flow graph -> it has false
+positives (matches in comments/strings) and false negatives (taint through
+calls, aliasing, complex expressions). Use the output to prioritise, then confirm
+each finding by hand.
 
 Usage
 -----
@@ -35,8 +33,8 @@ import os
 import re
 import sys
 
-# --- Sinks: (id, compiled regex, base severity, explanation) ----------------
-SINKS = [
+# --- JavaScript / TypeScript sinks ------------------------------------------
+JS_SINKS = [
     ("innerHTML",         re.compile(r'\.(?:inner|outer)HTML\s*='),
      "high",   "value assigned to (inner|outer)HTML is parsed as HTML"),
     ("insertAdjacentHTML", re.compile(r'\.insertAdjacentHTML\s*\('),
@@ -64,9 +62,7 @@ SINKS = [
     ("src-href",          re.compile(r'\.(?:src|href)\s*='),
      "low",    "src/href assignment - javascript:/data: URLs may execute"),
 ]
-
-# --- Sources: attacker-controllable inputs ----------------------------------
-SOURCES = [
+JS_SOURCES = [
     ("location.hash",     re.compile(r'\blocation\.hash\b')),
     ("location.search",   re.compile(r'\blocation\.search\b')),
     ("location.href",     re.compile(r'\blocation\.href\b')),
@@ -79,20 +75,45 @@ SOURCES = [
     ("URL-params",        re.compile(r'\bURLSearchParams\b|\.searchParams\b')),
     ("history.state",     re.compile(r'\bhistory\.state\b')),
 ]
-# message-event data (e.data / event.data) counts as a source only in files that
-# actually register a message listener - checked per file to cut noise.
 MSG_LISTENER = re.compile(r'addEventListener\s*\(\s*[\'"`]message[\'"`]|\.onmessage\s*=')
 MSG_DATA = re.compile(r'\b[A-Za-z_$][\w$]*\.data\b')
 
+# --- C# / ASP.NET & Razor sinks (server-rendered XSS) -----------------------
+CS_SINKS = [
+    ("Html.Raw",       re.compile(r'@?Html\.Raw\s*\('),
+     "high",   "@Html.Raw() emits its argument as unescaped HTML"),
+    ("Response.Write", re.compile(r'\bResponse\.Write\s*\('),
+     "high",   "Response.Write() writes raw output straight into the response"),
+    ("HtmlString",     re.compile(r'\bnew\s+(?:Mvc)?HtmlString\s*\('),
+     "high",   "HtmlString/MvcHtmlString marks a string as trusted, un-encoded HTML"),
+    ("MarkupString",   re.compile(r'\bnew\s+MarkupString\s*\(|\(\s*MarkupString\s*\)'),
+     "high",   "Blazor MarkupString renders a string as raw HTML"),
+    ("InnerHtml",      re.compile(r'\.InnerHtml\s*='),
+     "high",   "control.InnerHtml assignment renders raw HTML"),
+    ("Literal.Text",   re.compile(r'\.Text\s*=\s*(?![\'"])'),
+     "low",    "Literal/Label .Text set from a dynamic value (raw when Mode=PassThrough)"),
+]
+CS_SOURCES = [
+    ("Request.Query",   re.compile(r'\bRequest\.(?:Query|QueryString)\b')),
+    ("Request.Form",    re.compile(r'\bRequest\.Form\b')),
+    ("Request.Params",  re.compile(r'\bRequest\.Params\b|\bRequest\s*\[')),
+    ("Request.Cookies", re.compile(r'\bRequest\.Cookies\b')),
+    ("Request.Headers", re.compile(r'\bRequest\.Headers\b')),
+    ("Request.Route",   re.compile(r'\bRequest\.RouteValues\b|\bRouteData\b')),
+    ("Request.Body",    re.compile(r'\bRequest\.Body\b')),
+]
+
 ASSIGN = re.compile(r'^\s*(?:var|let|const)?\s*([A-Za-z_$][\w$]*)\s*=\s*(.+?)\s*;?\s*$')
 CONF_RANK = {"low": 0, "medium": 1, "high": 2}
+JS_EXT = (".js", ".ts", ".jsx", ".tsx", ".mjs")
+CS_EXT = (".cs", ".cshtml", ".razor")
 
 
-def source_hits(text, msg_active):
+def source_hits(text, sources, msg_active):
     """Names of sources *read* in `text`. A source that is the target of an
-    assignment (e.g. `location.href = x`) is a sink, not a read, so skip it."""
+    assignment (e.g. `location.href = x`) is a write, not a read, so skip it."""
     hits = []
-    for name, rx in SOURCES:
+    for name, rx in sources:
         for m in rx.finditer(text):
             after = text[m.end():].lstrip()
             if after[:1] == "=" and after[1:2] != "=":
@@ -104,18 +125,18 @@ def source_hits(text, msg_active):
     return hits
 
 
-def compute_taint(lines, msg_active):
-    """Fixpoint: a var is tainted if it is assigned from a source or another
-    tainted var. Cheap approximation of data flow across straight-line code."""
+def compute_taint(lines, sources, msg_active):
+    """JS only: a var is tainted if assigned from a source or another tainted
+    var. Bounded fix-point - a cheap approximation of straight-line data flow."""
     tainted = set()
-    for _ in range(6):  # iterate to a fixpoint (bounded)
+    for _ in range(6):
         changed = False
         for line in lines:
             m = ASSIGN.match(line)
             if not m:
                 continue
             lhs, rhs = m.group(1), m.group(2)
-            if source_hits(rhs, msg_active) or any(
+            if source_hits(rhs, sources, msg_active) or any(
                 re.search(r'\b' + re.escape(v) + r'\b', rhs) for v in tainted
             ):
                 if lhs not in tainted:
@@ -127,28 +148,30 @@ def compute_taint(lines, msg_active):
 
 
 def scan_file(path):
+    ext = os.path.splitext(path)[1].lower()
+    is_js = ext in JS_EXT
+    sinks, sources = (JS_SINKS, JS_SOURCES) if is_js else (CS_SINKS, CS_SOURCES)
+
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             lines = fh.read().split("\n")
     except OSError:
         return []
 
-    joined = "\n".join(lines)
-    msg_active = bool(MSG_LISTENER.search(joined))
-    tainted = compute_taint(lines, msg_active)
-    dynamic = re.compile(r'[A-Za-z_$][\w$]*')  # any identifier => not a pure literal
+    msg_active = is_js and bool(MSG_LISTENER.search("\n".join(lines)))
+    tainted = compute_taint(lines, sources, msg_active) if is_js else set()
+    dynamic = re.compile(r'[A-Za-z_$@][\w$]*')
 
     findings = []
     for lineno, line in enumerate(lines, 1):
-        matched_here = {sid for sid, rx, *_ in SINKS if rx.search(line)}
-        for sid, rx, severity, desc in SINKS:
+        matched_here = {sid for sid, rx, *_ in sinks if rx.search(line)}
+        for sid, rx, severity, desc in sinks:
             if sid not in matched_here:
                 continue
-            # `location.href =` is already reported as `navigation`; don't also
-            # report it as the weaker, overlapping `src-href` sink.
+            # `location.href =` is already 'navigation'; don't double-report it.
             if sid == "src-href" and "navigation" in matched_here:
                 continue
-            srcs = source_hits(line, msg_active)
+            srcs = source_hits(line, sources, msg_active)
             tvars = [v for v in tainted if re.search(r'\b' + re.escape(v) + r'\b', line)]
             if srcs or tvars:
                 confidence = "high"
@@ -157,29 +180,28 @@ def scan_file(path):
             else:
                 confidence = "low"
             findings.append({
-                "file": path, "line": lineno, "sink": sid,
-                "severity": severity, "confidence": confidence,
-                "description": desc, "code": line.strip()[:200],
-                "sources": srcs, "tainted_vars": tvars,
+                "file": path, "line": lineno, "sink": sid, "lang": "js" if is_js else "cs",
+                "severity": severity, "confidence": confidence, "description": desc,
+                "code": line.strip()[:200], "sources": srcs, "tainted_vars": tvars,
             })
     return findings
 
 
-def iter_js(target):
+def iter_files(target):
     if os.path.isfile(target):
         yield target
         return
     for root, _, files in os.walk(target):
-        if "node_modules" in root or "/.git" in root:
+        if "node_modules" in root or os.sep + ".git" in root:
             continue
         for name in files:
-            if name.endswith((".js", ".ts", ".jsx", ".tsx", ".mjs")):
+            if name.endswith(JS_EXT + CS_EXT):
                 yield os.path.join(root, name)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="DOM XSS source-to-sink analyzer")
-    ap.add_argument("target", help="JavaScript file or directory to scan")
+    ap = argparse.ArgumentParser(description="source-to-sink XSS analyzer (JS + C#/.NET)")
+    ap.add_argument("target", help="file or directory to scan")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of text")
     ap.add_argument("--min-confidence", choices=["low", "medium", "high"],
                     default="low", help="hide findings below this confidence")
@@ -187,8 +209,8 @@ def main():
 
     floor = CONF_RANK[args.min_confidence]
     findings = []
-    for js in iter_js(args.target):
-        findings.extend(scan_file(js))
+    for f in iter_files(args.target):
+        findings.extend(scan_file(f))
     findings = [f for f in findings if CONF_RANK[f["confidence"]] >= floor]
     findings.sort(key=lambda f: (-CONF_RANK[f["confidence"]], f["file"], f["line"]))
 
@@ -197,7 +219,7 @@ def main():
         sys.exit(1 if findings else 0)
 
     if not findings:
-        print("No DOM-XSS source/sink patterns found (at the chosen confidence).")
+        print("No XSS source/sink patterns found (at the chosen confidence).")
         sys.exit(0)
 
     for f in findings:
@@ -206,8 +228,8 @@ def main():
             flow = "  <- source: " + ", ".join(f["sources"])
         elif f["tainted_vars"]:
             flow = "  <- tainted var: " + ", ".join(f["tainted_vars"])
-        print(f"{f['file']}:{f['line']}  [{f['severity'].upper()}/"
-              f"{f['confidence']} confidence]  sink: {f['sink']}{flow}")
+        print(f"{f['file']}:{f['line']}  [{f['severity'].upper()}/{f['confidence']} "
+              f"confidence, {f['lang']}]  sink: {f['sink']}{flow}")
         print(f"    {f['description']}")
         print(f"    | {f['code']}")
         print()

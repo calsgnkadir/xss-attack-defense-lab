@@ -1,0 +1,12 @@
+@* Example Razor view with server-rendered XSS sinks. Unsafe on purpose. *@
+@model ProfileModel
+
+<h2>@Model.Name</h2>
+
+@* HIGH: request input rendered as raw, unescaped HTML *@
+<div>@Html.Raw(Request.Query["q"])</div>
+
+@* MEDIUM: model text rendered raw (source not visible on this line) *@
+<section>@Html.Raw(Model.Description)</section>
+
+@* Safe for comparison: Razor auto-encodes @Model.Name above, so it is fine. *@
