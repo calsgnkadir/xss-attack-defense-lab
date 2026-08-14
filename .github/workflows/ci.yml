@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: dom-xss-analyzer tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run test suite
+        working-directory: tools/dom-xss-analyzer
+        run: pytest -q
+
+      - name: Self-scan the example corpus
+        working-directory: tools/dom-xss-analyzer
+        run: |
+          # the analyzer must still flag the intentionally-vulnerable examples
+          python dxa.py examples/ --min-confidence high && exit 1 || echo "findings reported as expected"

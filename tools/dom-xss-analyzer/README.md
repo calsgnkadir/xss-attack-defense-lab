@@ -1,5 +1,7 @@
 # dxa — source→sink XSS analyzer (full-stack)
 
+[![CI](https://github.com/calsgnkadir/xss-attack-defense-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/calsgnkadir/xss-attack-defense-lab/actions/workflows/ci.yml)
+
 A small, dependency-free static linter that flags XSS sources, sinks, and the
 likely **source → sink flows** between them — on **both sides** of a web app:
 
@@ -65,6 +67,18 @@ examples/vulnerable.js:6  [HIGH/high confidence]  sink: innerHTML  <- tainted va
 
 `examples/vulnerable.js` (flagged) and `examples/safe.js` (the escaped/guarded
 equivalents, quiet at `--min-confidence high`) double as a self-test.
+
+## Tests
+
+A `pytest` suite (`test_dxa.py`) locks down the detector's behaviour — taint
+propagation, source read-vs-write, the C#/Razor rules, and that guarded/literal
+cases are *not* raised to high confidence. It runs in CI on every push (see the
+badge above).
+
+```bash
+pip install pytest
+pytest -q      # from this directory
+```
 
 ## Honest limitations
 
