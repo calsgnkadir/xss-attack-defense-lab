@@ -30,6 +30,8 @@ step, not just paste a payload.
 - **Independent, real-world research** applying the same method to third-party open-source software,
   with externally-validated results and coordinated disclosure (see
   [`research/`](research/) — *Beyond the Lab*).
+- **Tooling** — the source → sink methodology encoded as a small static analyzer that flags DOM-XSS
+  sources, sinks, and likely flows in JavaScript (see [`tools/dom-xss-analyzer/`](tools/dom-xss-analyzer/)).
 
 ---
 
@@ -173,6 +175,7 @@ xss-attack-defense-lab/
 ├── README.md          – this file
 ├── methodology.md     – the full source → sink hunting method
 ├── research/          – Beyond the Lab: independent real-world research + validated results
+├── tools/             – dom-xss-analyzer: the source → sink method as a static linter (Python)
 ├── report/
 │   └── OWASP-JuiceShop-Security-Assessment.pdf   – full report (per-finding steps, impact, remediation)
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
