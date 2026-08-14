@@ -7,10 +7,10 @@ payloads — using the hands-on findings and local labs here as concrete example
 | # | Title | Class | Based on |
 |---|-------|-------|----------|
 | 01 | [Why filtering isn't protection: the nested-tag sanitizer bypass](01-filtering-is-not-protection.md) | Sanitizer bypass / mutation | Findings 2 & 8 |
+| 02 | [Mutation XSS (mXSS): when the browser rewrites your "clean" HTML](02-mutation-xss.md) | Mutation XSS | [`labs/mxss-lab.html`](../labs/mxss-lab.html) |
 
 **Planned:**
 
-- Mutation XSS (mXSS): how a browser re-parse turns a "clean" string into a live one — based on [`labs/mxss-lab.html`](../labs/mxss-lab.html)
 - DOM Clobbering: access control bypass with zero script — based on [`labs/clobber-lab.html`](../labs/clobber-lab.html)
 - Prototype Pollution → XSS: from `__proto__` in a query string to an `innerHTML` sink — based on [`labs/protopollution-lab.html`](../labs/protopollution-lab.html)
 
