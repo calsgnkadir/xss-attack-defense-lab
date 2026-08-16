@@ -11,6 +11,11 @@ likely **source → sink flows** between them — on **both sides** of a web app
 It is the `source → sink` methodology from this repository
 ([`../../methodology.md`](../../methodology.md)) expressed as runnable code.
 
+![dxa HTML report](report-preview.png)
+
+*The `--html` report: severity/confidence badges, the source→sink flow, and the
+offending line for every finding — both JavaScript (DOM XSS) and C#/.NET.*
+
 ## What it does
 
 1. **Finds sinks.**
