@@ -38,7 +38,7 @@ It is the `source → sink` methodology from this repository
 ## Usage
 
 ```bash
-python dxa.py <file-or-directory> [--json] [--min-confidence low|medium|high]
+python dxa.py <file-or-directory> [--json] [--html FILE] [--min-confidence low|medium|high]
 ```
 
 Exit code is non-zero when findings are reported, so it can gate CI.
@@ -52,6 +52,9 @@ python dxa.py ../../ --min-confidence high
 
 # machine-readable output
 python dxa.py src/ --json
+
+# self-contained HTML report (severity/confidence, source->sink flow, code)
+python dxa.py src/ --html report.html
 ```
 
 ### Example
