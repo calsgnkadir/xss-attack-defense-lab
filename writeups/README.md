@@ -11,11 +11,9 @@ payloads — using the hands-on findings and local labs here as concrete example
 | 03 | [Assessing DOM XSS in a hardened React SPA (a field methodology)](03-dom-xss-assessment-react-spa.md) | DOM XSS / source→sink audit | Live bug-bounty target (anonymised) |
 | 04 | [SQL Injection: when your input becomes part of the query](04-sql-injection.md) | SQL Injection | Finding #6 + PortSwigger Academy labs |
 | 05 | [Forging JWTs: `alg:none` and RS256→HS256 key confusion](05-jwt-forgery.md) | JWT / broken authentication | OWASP Juice Shop JWT challenges |
-
-**Planned:**
-
-- DOM Clobbering: access control bypass with zero script — based on [`labs/clobber-lab.html`](../labs/clobber-lab.html)
-- Prototype Pollution → XSS: from `__proto__` in a query string to an `innerHTML` sink — based on [`labs/protopollution-lab.html`](../labs/protopollution-lab.html)
+| 06 | [DOM Clobbering: breaking a control with only HTML](06-dom-clobbering.md) | DOM Clobbering | [`labs/clobber-lab.html`](../labs/clobber-lab.html) (Finding #10) |
+| 07 | [Prototype Pollution: poisoning every object at once](07-prototype-pollution.md) | Prototype Pollution → XSS | [`labs/protopollution-lab.html`](../labs/protopollution-lab.html) (Finding #11) |
+| 08 | [jQuery footguns: `$()`, `.html()`, and `$.extend` pollution](08-jquery-footguns.md) | jQuery DOM XSS / pollution | [`labs/jquery-lab.html`](../labs/jquery-lab.html) (Finding #12) |
 
 > Lab-based writeups use authorized, local, intentionally-vulnerable targets
 > only. Field writeups (e.g. 03) come from authorized testing under a public
