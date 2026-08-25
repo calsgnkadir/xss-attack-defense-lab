@@ -1,8 +1,8 @@
 # Screenshots — selected evidence
 
 Selected captures from the assessment on an authorized, local OWASP Juice Shop instance. The full,
-per-finding walkthrough (payloads, steps, impact, remediation) is in the
-[report](../report/OWASP-JuiceShop-Security-Assessment.pdf).
+per-finding walkthrough (mechanism, steps, impact, remediation) is in the
+[main README](../README.md#findings) and the [writeups](../writeups/).
 
 | File | Shows |
 |------|-------|
@@ -16,4 +16,5 @@ per-finding walkthrough (payloads, steps, impact, remediation) is in the
 | `08-header-xss-filter-mapping.jpg` | Header XSS — systematically mapping the allowlist filter (an `<img>` payload is stripped) before bypassing it |
 
 > A curated subset. Most findings (DOM-based XSS, SQL Injection, IDOR, and the stored-XSS chains) are
-> documented step-by-step, with exact payloads and expected results, in the full report.
+> documented step-by-step, with exact payloads and expected results, in the [writeups](../writeups/)
+> and the README findings table.

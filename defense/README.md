@@ -2,7 +2,7 @@
 
 Finding a vulnerability is only half the job — knowing how to **fix** it is the other half. For every
 class exercised in this assessment, this is how it should be defended, and *why*. These mitigations
-map directly to the findings in the [report](../report/OWASP-JuiceShop-Security-Assessment.pdf).
+map directly to the findings in the [main README](../README.md#findings) and the [writeups](../writeups/).
 
 ## The one rule behind most XSS
 

@@ -97,8 +97,8 @@ corresponding PortSwigger Web Security Academy lab.
 
 ## Evidence
 
-Selected captures — the full per-finding walkthrough (payloads, steps, remediation) is in the
-[report](report/OWASP-JuiceShop-Security-Assessment.pdf).
+Selected captures. The full per-finding walkthrough (mechanism, steps, remediation) is in the
+[Findings](#findings) table above and the [writeups](writeups/).
 
 **OWASP Juice Shop Score Board** — solved challenges including *Login Admin*, *Password Strength*
 (SQL Injection / weak credentials) and *View Basket* (IDOR):
@@ -173,16 +173,13 @@ xss-attack-defense-lab/
 ├── methodology.md     – the full source → sink hunting method
 ├── tools/             – dom-xss-analyzer: the source → sink method as a static linter (Python) + CI
 ├── research/          – Beyond the Lab: independent real-world research + externally-validated results
-├── report/
-│   └── OWASP-JuiceShop-Security-Assessment.pdf   – full report (per-finding steps, impact, remediation)
 ├── writeups/          – mechanism-first technical explainers, each tied to a confirmed finding
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
 └── defense/           – written secure-coding defenses for every confirmed class
 ```
 
-📄 **Full report:** [`report/OWASP-JuiceShop-Security-Assessment.pdf`](report/OWASP-JuiceShop-Security-Assessment.pdf)
-— executive summary, methodology, and each finding with vulnerability class, how it works, the exact
-steps taken, impact, and remediation.
+📄 **Findings:** each vulnerability — class, how it works, steps taken, impact, and remediation — is in
+the [Findings](#findings) table above and expanded in the [`writeups/`](writeups/).
 
 📸 **Evidence:** selected captures in [`screenshots/`](screenshots/) (solved challenges, Burp Repeater,
 HTTP history, profile/CSP fields).
