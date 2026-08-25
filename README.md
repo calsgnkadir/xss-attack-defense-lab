@@ -11,7 +11,7 @@ step, not just paste a payload.
 
 > ⚠️ **Scope & ethics.** Every test in this repository was carried out **only** on authorized,
 > local, intentionally-vulnerable targets (OWASP Juice Shop running locally via Docker on
-> `localhost:3001`, self-authored HTML labs, and PortSwigger Academy labs). Nothing here targets
+> `localhost:3000`, self-authored HTML labs, and PortSwigger Academy labs). Nothing here targets
 > any real, third-party, or production system. These techniques must only ever be used on systems
 > you own or are explicitly authorized to test.
 
