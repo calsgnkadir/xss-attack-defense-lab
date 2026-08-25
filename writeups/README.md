@@ -10,10 +10,10 @@ payloads — using the hands-on findings and local labs here as concrete example
 | 02 | [Mutation XSS (mXSS): when the browser rewrites your "clean" HTML](02-mutation-xss.md) | Mutation XSS | [`labs/mxss-lab.html`](../labs/mxss-lab.html) |
 | 03 | [Assessing DOM XSS in a hardened React SPA (a field methodology)](03-dom-xss-assessment-react-spa.md) | DOM XSS / source→sink audit | Live bug-bounty target (anonymised) |
 | 04 | [SQL Injection: when your input becomes part of the query](04-sql-injection.md) | SQL Injection | Finding #6 + PortSwigger Academy labs |
+| 05 | [Forging JWTs: `alg:none` and RS256→HS256 key confusion](05-jwt-forgery.md) | JWT / broken authentication | OWASP Juice Shop JWT challenges |
 
 **Planned:**
 
-- JWT attacks: `alg:none` forgery and RS256→HS256 key confusion — based on OWASP Juice Shop's JWT challenges
 - DOM Clobbering: access control bypass with zero script — based on [`labs/clobber-lab.html`](../labs/clobber-lab.html)
 - Prototype Pollution → XSS: from `__proto__` in a query string to an `innerHTML` sink — based on [`labs/protopollution-lab.html`](../labs/protopollution-lab.html)
 
