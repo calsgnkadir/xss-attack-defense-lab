@@ -1,8 +1,8 @@
 # Beyond the Lab — Independent Vulnerability Research
 
-After building the lab foundation in this repository (OWASP Juice Shop, self-authored labs,
-PortSwigger Academy), I applied the same **source → sink** discipline to *real, third-party
-open-source software*: plugins published in the WordPress.org directory.
+After building the foundation in this repository (OWASP Juice Shop, PortSwigger Academy), I applied
+the same **source → sink** discipline to *real, third-party open-source software*: plugins published
+in the WordPress.org directory.
 
 > ⚠️ **Scope & ethics.** Only **publicly distributed open-source code** was analysed. Every candidate
 > was reproduced **only** in a private, local, Dockerized WordPress instance I control — never against

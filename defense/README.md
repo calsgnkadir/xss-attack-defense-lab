@@ -34,10 +34,7 @@ re-forms another (the nested-tag mutation in Findings 2 and 8). The reliable con
 | **SQL Injection** (product search) | User input concatenated into SQL | Parameterized queries / ORM bindings only; least-privilege DB user. |
 | **IDOR / BOLA** (basket) | Ownership never checked | Enforce per-object authorization on every request (`resource.ownerId === session.userId`). |
 | **Zip Slip → Stored XSS** (subtitle) | Archive entry names not validated; content rendered raw | Reject/normalise `../` in entry names, extract only inside the target dir; sanitise rendered content (incl. subtitles). |
-| **mXSS (Mutation XSS)** | Browser re-parse mutates a "clean" string into a live one | Allowlist on the *parsed* DOM; parse-serialise idempotently; DOMPurify. |
-| **DOM Clobbering** | Code reads a global that an injected `id`/`name` can shadow | Read via `getElementById`, not the global namespace; `Object.create(null)` for lookup maps. |
-| **Prototype Pollution → XSS** | Guard-less deep merge / query parser writes to `__proto__` | Guard `__proto__`/`constructor`; `Object.freeze(Object.prototype)`; keep libraries current. |
-| **jQuery-specific XSS** | `$(userInput)` builds HTML; `.html()` is an `innerHTML` sink; old `$.extend` pollution | Prefer `.text()`; never pass user input to `$()`; upgrade to jQuery ≥ 3.5. |
+| **Mutation XSS** (Findings 2 & 8) | Browser re-parse mutates a "clean" string into a live one | Allowlist on the *parsed* DOM; parse-serialise idempotently; DOMPurify. |
 
 ## Cross-cutting principles
 

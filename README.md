@@ -1,24 +1,24 @@
-# Web Application Security — Attack & Defense Lab
+# Web Application Security — Findings, Tooling & Independent Research
 
-Hands-on web application security research across multiple **OWASP Top 10** classes — **XSS**
-(reflected, stored, DOM, mutation, clobbering, prototype pollution), **SQL Injection**,
-**JWT / broken authentication**, **access control (IDOR/BOLA)**, and **CSP bypass** — with every
-attack paired with its defense. Testing was performed against **OWASP Juice Shop** (a deliberately
-vulnerable, official OWASP training application), self-built local labs, and PortSwigger Web
-Security Academy.
+Hands-on web application security work built on three concrete outputs: **confirmed vulnerabilities**
+on OWASP Juice Shop, a **working DOM-XSS static analyzer** I wrote (with tests + CI), and
+**independent research on real third-party open-source software** that produced externally-validated
+results. The classes covered span the **OWASP Top 10** — **XSS** (reflected, stored, DOM, mutation),
+**SQL Injection**, **JWT / broken authentication**, **access control (IDOR/BOLA)**, and **CSP
+bypass** — each attack paired with its defense.
 
-> XSS is where this repo goes deepest (its origin and the `dom-xss-analyzer` tool), but the same
+> XSS is where this work goes deepest (its origin and the `dom-xss-analyzer` tool), but the same
 > **source → sink** discipline is applied across injection, authentication, and access-control bugs.
 
 The goal was not to collect scoreboard points, but to **understand the mechanisms** behind each
 vulnerability class using a repeatable *source → sink* methodology — and to be able to explain every
 step, not just paste a payload.
 
-> ⚠️ **Scope & ethics.** Every test in this repository was carried out **only** on authorized,
-> local, intentionally-vulnerable targets (OWASP Juice Shop running locally via Docker on
-> `localhost:3000`, self-authored HTML labs, and PortSwigger Academy labs). Nothing here targets
-> any real, third-party, or production system. These techniques must only ever be used on systems
-> you own or are explicitly authorized to test.
+> ⚠️ **Scope & ethics.** Everything here was carried out **only** on authorized targets: OWASP Juice
+> Shop running locally via Docker on `localhost:3000`, publicly-distributed open-source code verified
+> in a private local environment, and one authorized bug-bounty program (assessed under its scope and
+> rules, target anonymised). Nothing here targets any unauthorized, third-party, or production system.
+> These techniques must only ever be used on systems you own or are explicitly authorized to test.
 
 ---
 
@@ -28,8 +28,6 @@ step, not just paste a payload.
   injection bugs (see [`methodology.md`](methodology.md)).
 - **Findings** across multiple XSS classes plus SQL Injection and IDOR, including both *positive*
   results (working exploits) and *negative* results (where a defense held — also a valid finding).
-- Self-authored **local labs** that isolate advanced/"next-gen" XSS classes that Juice Shop does not
-  expose (see [`labs/`](labs/)).
 - A clear link between **attack** and **defense**: each finding is paired with a remediation, and
   [`defense/`](defense/) collects the secure-coding fix for every class in one place.
 - **Independent, real-world research** applying the same method to third-party open-source software,
@@ -49,7 +47,7 @@ step, not just paste a payload.
 | **Burp Suite** (Community) | Proxy to capture requests; **Repeater** to modify and resend raw HTTP; header injection; API testing without the frontend |
 | **Chrome DevTools (F12)** | **Elements** (verify raw HTML vs escaped in the DOM), **Console** (proof of execution), **Network** (request/response inspection) |
 | **OWASP Juice Shop** (Docker) | Primary authorized target |
-| **PortSwigger Web Security Academy** | Additional labs (CSP bypass, client-side prototype pollution) |
+| **PortSwigger Web Security Academy** | Additional structured labs (SQL injection, CSP bypass) used to cross-check technique |
 
 ---
 
@@ -65,7 +63,7 @@ step, not just paste a payload.
 ```
 
 **Key decision — network or browser?**
-A vulnerability that stays in the browser (DOM-based XSS, mutation, clobbering, prototype pollution)
+A vulnerability that stays in the browser (DOM-based XSS, mutation XSS)
 is analysed from **DevTools (Console / Elements)** — the Network tab is empty because the payload
 never reaches the server. A vulnerability that travels to the server (reflected, stored, header,
 API) is analysed from the **Network / Burp** side (payload vs. response). Picking the right layer is
@@ -79,11 +77,10 @@ Full write-up: see [`methodology.md`](methodology.md).
 
 **Results at a glance:** eight working vulnerabilities were confirmed on OWASP Juice Shop — an
 account-takeover-capable DOM XSS, four stored-XSS paths (feedback, Zip Slip, registration API, and a
-header-based one), a CSP bypass, SQL Injection and an IDOR — plus advanced classes demonstrated in
-self-authored labs.
+header-based one), a CSP bypass, SQL Injection and an IDOR.
 
-Legend — **Confirmed**: working exploit reproduced · **Lab**: demonstrated in a self-authored isolated
-lab · **Academy**: PortSwigger lab.
+Legend — **Confirmed**: working exploit reproduced on the target · **Academy**: also solved on the
+corresponding PortSwigger Web Security Academy lab.
 
 | # | Vulnerability | Target | Status | Core mechanism |
 |---|---------------|--------|--------|----------------|
@@ -95,10 +92,6 @@ lab · **Academy**: PortSwigger lab.
 | 6 | **SQL Injection** (product search `?q=`) | Juice Shop | ✅ Confirmed | `UNION SELECT` breaks out of the query and exfiltrates user emails + password hashes from the `Users` table |
 | 7 | **IDOR / BOLA** (`/rest/basket/{id}`) | Juice Shop | ✅ Confirmed | Server authenticates the token but does not verify object ownership; changing the basket id returns other users' baskets |
 | 8 | **Stored XSS — HTTP header** (`True-Client-IP`) | Juice Shop | ✅ Confirmed | Header reaches `lastLoginIp` behind an allowlist sanitizer; a **nested-tag mutation** (same technique as #2) bypasses it and the payload fires on the Last Login IP page |
-| 9 | **mXSS (Mutation XSS)** | Local lab | ✅ Lab | Browser mutates `<image>` → `<img>` on an `innerHTML` round-trip, defeating a filter that only blocks `<img>` |
-| 10 | **DOM Clobbering** | Local lab | ✅ Lab | An `<a id="isAdmin">` element shadows a `window.isAdmin` global — access-control bypass with **zero script** |
-| 11 | **Prototype Pollution → XSS** | Local lab / Academy | ✅ Lab / Solved | `__proto__[x]=y` in a query string pollutes `Object.prototype`; a gadget then reaches an `innerHTML` sink |
-| 12 | **jQuery-specific XSS** | Local lab | ✅ Lab | `$(userInput)` selector-to-HTML, `.html()` sink, and `$.extend(true, …)` prototype pollution (CVE-2019-11358) on jQuery 3.3.1 |
 
 ---
 
@@ -163,11 +156,8 @@ unpatched details are published. Full methodology and honest results: [`research
 | Class | Fix |
 |-------|-----|
 | DOM XSS (`bypassSecurityTrustHtml`) | Remove the bypass; rely on auto-escaping; use `DomSanitizer.sanitize` / DOMPurify if raw HTML is truly required |
-| Sanitizer bypass / mXSS | Allowlist over blocklist; a tested DOM-based library; idempotent single-parse; recursive sanitization |
-| DOM Clobbering | Read via `getElementById` not the global namespace; `Object.create(null)` for lookup maps |
-| Prototype Pollution | Guard `__proto__`/`constructor`; `Object.freeze(Object.prototype)`; update libraries |
+| Sanitizer bypass / mutation XSS | Allowlist over blocklist; a tested DOM-based library; idempotent single-parse; recursive sanitization |
 | CSP | Strict CSP + nonce; **never reflect user input into a security header** |
-| jQuery | Prefer `.text()`; never pass user input to `$()`; upgrade to ≥ 3.5 |
 | SQL Injection | Parameterized queries / ORM bindings; never concatenate input into SQL |
 | IDOR / BOLA | Enforce per-object authorization (`resource.ownerId === session.userId`) on every request |
 | Zip Slip | Validate/normalize archive entry names; reject `../`; extract only within the target directory |
@@ -181,18 +171,13 @@ unpatched details are published. Full methodology and honest results: [`research
 xss-attack-defense-lab/
 ├── README.md          – this file
 ├── methodology.md     – the full source → sink hunting method
-├── research/          – Beyond the Lab: independent real-world research + validated results
-├── tools/             – dom-xss-analyzer: the source → sink method as a static linter (Python)
-├── writeups/          – mechanism-first technical explainers for each vulnerability class
+├── tools/             – dom-xss-analyzer: the source → sink method as a static linter (Python) + CI
+├── research/          – Beyond the Lab: independent real-world research + externally-validated results
 ├── report/
 │   └── OWASP-JuiceShop-Security-Assessment.pdf   – full report (per-finding steps, impact, remediation)
+├── writeups/          – mechanism-first technical explainers, each tied to a confirmed finding
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
-├── defense/           – written secure-coding defenses for every vulnerability class
-└── labs/              – self-authored, isolated labs for advanced XSS classes
-    ├── mxss-lab.html
-    ├── clobber-lab.html
-    ├── protopollution-lab.html
-    └── jquery-lab.html
+└── defense/           – written secure-coding defenses for every confirmed class
 ```
 
 📄 **Full report:** [`report/OWASP-JuiceShop-Security-Assessment.pdf`](report/OWASP-JuiceShop-Security-Assessment.pdf)
@@ -207,9 +192,9 @@ HTTP history, profile/CSP fields).
 ## Disclaimer & License
 
 This repository is for **education and defensive research only**. Every technique was performed on
-**authorized, local, intentionally-vulnerable** targets (OWASP Juice Shop, self-authored labs,
-PortSwigger Academy). Do **not** use any of it against systems you do not own or are not explicitly
-authorized to test — unauthorized testing is illegal.
+**authorized** targets (OWASP Juice Shop locally, publicly-distributed open-source code verified in a
+private local environment, and PortSwigger Academy). Do **not** use any of it against systems you do
+not own or are not explicitly authorized to test — unauthorized testing is illegal.
 
 Released under the [MIT License](LICENSE).
 

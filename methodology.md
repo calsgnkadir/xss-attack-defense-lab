@@ -82,8 +82,7 @@ If the action hit an update/admin endpoint, ask whether the privilege used was a
 
 | Vulnerability | Where the work happens | How to analyse |
 |---------------|------------------------|----------------|
-| DOM-based XSS, mXSS, clobbering, prototype pollution | Entirely in the browser | DevTools **Console / Elements** (Network tab is empty) |
-| Prototype pollution delivery | Payload rides in the URL | Network shows the request; Console verifies pollution (`({}).x`) |
+| DOM-based XSS, mutation XSS | Entirely in the browser | DevTools **Console / Elements** (Network tab is empty) |
 | Reflected / Stored XSS | Input goes to the server and back | **Network / Burp** — payload (request) vs. reflection (response) |
 | Header XSS | Header the browser won't send on its own | **Burp** (Match-and-replace / manual header) |
 
