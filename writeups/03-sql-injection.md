@@ -83,9 +83,14 @@ to show usernames and password hashes instead:
   fits any type, so you probe with `NULL`s first, then swap a `NULL` for a string
   to find which column renders on the page.
 
-This is exactly **Finding #6** in this assessment: OWASP Juice Shop's product
-search (`?q=`) is injectable, and a `UNION SELECT` breaks out of the product query
-to exfiltrate **user emails and password hashes** straight from the `Users` table.
+In this assessment the shape I actually confirmed is **#1, the login bypass** —
+**Finding #6**: `' OR 1=1--` (equivalently `administrator'--`) in OWASP Juice Shop's
+login-form email field comments out the password check and logs me in as the
+administrator (the *Login Admin* challenge). I also practised the WHERE-clause
+retrieval and login-bypass shapes on PortSwigger's Academy SQLi labs. The `UNION`
+exfiltration above and the blind techniques below are included as the **mechanism**
+— I did **not** run a `UNION` data dump against Juice Shop, so they're documented as
+technique, not claimed as a finding.
 
 ## When you can't see the output: blind SQLi
 
@@ -151,7 +156,8 @@ structure. **Parameterise, and the border can't be crossed.**
 
 ---
 
-*Demonstrated on authorized targets only: OWASP Juice Shop running locally
-(Finding #6 — `UNION`-based exfiltration from the search sink) and the SQL-injection
-labs on PortSwigger's Web Security Academy. The method is the repo's
-`source → sink` discipline applied to the database layer.*
+*Hands-on, on authorized targets only: OWASP Juice Shop's *Login Admin* challenge —
+**solved** via a login-bypass injection (`' OR 1=1--`) — plus the WHERE-clause and
+login-bypass SQLi labs on PortSwigger's Web Security Academy. The `UNION` and blind
+sections are the mechanism explained for completeness, not run against Juice Shop.
+The method is the repo's `source → sink` discipline applied to the database layer.*

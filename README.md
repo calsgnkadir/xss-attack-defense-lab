@@ -89,7 +89,7 @@ corresponding PortSwigger Web Security Academy lab.
 | 3 | **Stored XSS — Zip Slip** (subtitle overwrite) | Juice Shop | ✅ Confirmed | Path-traversal in a `.zip` upload overwrites `owasp_promo.vtt`; the `/promotion` page renders the subtitle unsanitized |
 | 4 | **Stored XSS — registration API → admin panel** | Juice Shop | ✅ Confirmed | Posting an `<iframe>` email straight to `/api/Users` skips client-side validation; the admin "Registered Users" table renders it raw |
 | 5 | **CSP Bypass** (profile page) | Juice Shop / Academy | ✅ Confirmed | User input is reflected into the CSP header; injecting a permissive `script-src` re-opens inline execution (also solved on the PortSwigger CSP lab) |
-| 6 | **SQL Injection** (product search `?q=`) | Juice Shop | ✅ Confirmed | `UNION SELECT` breaks out of the query and exfiltrates user emails + password hashes from the `Users` table |
+| 6 | **SQL Injection — login bypass** (login form) | Juice Shop | ✅ Confirmed | `' OR 1=1--` / `administrator'--` in the email field comments out the password check → authenticated as admin (the *Login Admin* challenge) |
 | 7 | **IDOR / BOLA** (`/rest/basket/{id}`) | Juice Shop | ✅ Confirmed | Server authenticates the token but does not verify object ownership; changing the basket id returns other users' baskets |
 | 8 | **Stored XSS — HTTP header** (`True-Client-IP`) | Juice Shop | ✅ Confirmed | Header reaches `lastLoginIp` behind an allowlist sanitizer; a **nested-tag mutation** (same technique as #2) bypasses it and the payload fires on the Last Login IP page |
 

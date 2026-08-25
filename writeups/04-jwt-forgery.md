@@ -42,15 +42,20 @@ payload  = {"data":{"email":"jwtn3d@juice-sh.op"}}
 token    = base64url(header) . base64url(payload) .        ← empty signature
 ```
 
-Concretely, the token I forged for OWASP Juice Shop's *Unsigned JWT* challenge:
+Concretely, the token I forged for OWASP Juice Shop's *Unsigned JWT* challenge —
+**the one I actually landed** (the scoreboard turned green):
 
 ```
 eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJkYXRhIjp7ImVtYWlsIjoiand0bjNkQGp1aWNlLXNoLm9wIn19.
 ```
 
-The server decodes it, sees `alg: none`, skips verification, and treats the
-`email` claim as authenticated — impersonating a user that never existed. No key,
-no signature, just a header the server should never have trusted.
+How I did it in Burp: I took my own token out of the traffic, trimmed it to its
+`header.payload.signature` parts, decoded/re-encoded it in **Decoder**, then in
+**JWT Editor** changed the `email` claim and applied the *"alg:none"* attack (which
+rewrites the header to `none` and drops the signature). I pasted the resulting
+token into **Repeater** and sent it — the server saw `alg: none`, skipped
+verification, treated the `email` claim as authenticated, and the challenge solved.
+No key, no signature, just a header the server should never have trusted.
 
 > **Field note.** Encoding this by hand is fiddly only because of base64url:
 > after a standard base64 encode, strip `=` padding and swap `+`→`-`, `/`→`_`. The
@@ -74,18 +79,22 @@ same key material to whichever algorithm the token names — roughly
 
 It works because HMAC is symmetric: the public key, meant only for RSA
 *verification*, becomes a shared secret the moment the server will HMAC with it.
-For Juice Shop's *Forged Signed JWT* challenge the public key is served right at
-`/encryptionkeys/jwt.pub`; forge `email: rsa_lord@juice-sh.op`, HS256-sign with
-that key, send.
+Juice Shop's *Forged Signed JWT* challenge serves the public key right at
+`/encryptionkeys/jwt.pub`; the intended path is to forge `email:
+rsa_lord@juice-sh.op`, switch the header to `HS256`, and HMAC-sign with that key.
 
-> **Field note — the finicky part.** The HMAC secret must be the public key
-> **byte-for-byte** as the server holds it: PEM vs DER, PKCS#1 (`BEGIN RSA PUBLIC
-> KEY`) vs PKCS#8 (`BEGIN PUBLIC KEY`), and — the classic trap — whether there's a
-> **trailing newline**. A tool that reformats the key computes a different HMAC and
-> silently fails even though the token *looks* right (well-formed, `200 OK`, but
-> the challenge doesn't solve). Burp's **JWT Editor → HMAC Key Confusion** handles
-> the format and offers a "remove trailing newline" toggle precisely for this; if
-> it still misses, HMAC the *exact* file bytes yourself.
+> **Honest field note — I did *not* land this one.** I attempted the key-confusion
+> forge on the *Forged Signed JWT* challenge and it did **not** solve, so I'm
+> documenting the mechanism and exactly where it stalled rather than claiming a win.
+> The trap: the HMAC secret must be the public key **byte-for-byte** as the server
+> holds it — PEM vs DER, PKCS#1 (`BEGIN RSA PUBLIC KEY`) vs PKCS#8 (`BEGIN PUBLIC
+> KEY`), and, the classic one, whether there's a **trailing newline**. A tool that
+> reformats the key computes a *different* HMAC and fails silently: the token looks
+> right (well-formed, `200 OK`) but the challenge never flips. Burp's **JWT Editor →
+> HMAC Key Confusion** is meant to handle the format (with a "remove trailing
+> newline" toggle), but I couldn't get the key bytes to match in the time I spent.
+> This is the unsolved half of this writeup — kept here honestly, because knowing
+> *why* it's finicky is worth more than pretending it worked.
 
 ## The common root cause
 
@@ -124,8 +133,10 @@ thing being verified decide how it's verified.
 
 ---
 
-*Demonstrated on an authorized, local target only: OWASP Juice Shop's *Unsigned
-JWT* (`alg:none`) and *Forged Signed JWT* (RS256→HS256 key confusion) challenges,
-forged with Burp Suite (Decoder + JWT Editor) and sent via Repeater. Same lesson
-as the rest of this repo — never trust attacker-controlled input to make a
-security decision — applied to token authentication.*
+*Hands-on, on an authorized local target: OWASP Juice Shop's *Unsigned JWT*
+(`alg:none`) challenge — **solved** (Burp Decoder + JWT Editor's alg:none attack,
+token sent via Repeater, scoreboard green). The RS256→HS256 *Forged Signed JWT*
+challenge is explained and was **attempted but not solved** (key-format friction,
+noted above) — included for the mechanism, marked honestly rather than claimed.
+Same lesson as the rest of this repo: never trust attacker-controlled input to make
+a security decision.*

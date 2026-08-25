@@ -31,7 +31,7 @@ re-forms another (the nested-tag mutation in Findings 2 and 8). The reliable con
 | **Stored XSS — HTTP header** (`True-Client-IP`) | Same allowlist filter, bypassed by nested-tag mutation | Make sanitisation idempotent/recursive; never trust CDN headers (`True-Client-IP`, `X-Forwarded-For`) as input. |
 | **Stored XSS — registration API → admin panel** | Client-side validation only; admin panel renders raw | Validate on the **server** for every field; output-encode in the admin UI too. |
 | **CSP bypass** (profile Image URL) | User input reflected into the CSP header | Never reflect user input into a security header; use a static, strict CSP with nonces. |
-| **SQL Injection** (product search) | User input concatenated into SQL | Parameterized queries / ORM bindings only; least-privilege DB user. |
+| **SQL Injection** (login bypass) | User input concatenated into SQL | Parameterized queries / ORM bindings only; least-privilege DB user. |
 | **IDOR / BOLA** (basket) | Ownership never checked | Enforce per-object authorization on every request (`resource.ownerId === session.userId`). |
 | **Zip Slip → Stored XSS** (subtitle) | Archive entry names not validated; content rendered raw | Reject/normalise `../` in entry names, extract only inside the target dir; sanitise rendered content (incl. subtitles). |
 | **Mutation XSS** (Findings 2 & 8) | Browser re-parse mutates a "clean" string into a live one | Allowlist on the *parsed* DOM; parse-serialise idempotently; DOMPurify. |
