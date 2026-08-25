@@ -1,9 +1,14 @@
-# XSS Attack & Defense Lab
+# Web Application Security — Attack & Defense Lab
 
-Hands-on web application security research focused on **Cross-Site Scripting (XSS)** and related
-injection vulnerabilities. All testing was performed against **OWASP Juice Shop** (a deliberately
+Hands-on web application security research across multiple **OWASP Top 10** classes — **XSS**
+(reflected, stored, DOM, mutation, clobbering, prototype pollution), **SQL Injection**,
+**JWT / broken authentication**, **access control (IDOR/BOLA)**, and **CSP bypass** — with every
+attack paired with its defense. Testing was performed against **OWASP Juice Shop** (a deliberately
 vulnerable, official OWASP training application), self-built local labs, and PortSwigger Web
 Security Academy.
+
+> XSS is where this repo goes deepest (its origin and the `dom-xss-analyzer` tool), but the same
+> **source → sink** discipline is applied across injection, authentication, and access-control bugs.
 
 The goal was not to collect scoreboard points, but to **understand the mechanisms** behind each
 vulnerability class using a repeatable *source → sink* methodology — and to be able to explain every
