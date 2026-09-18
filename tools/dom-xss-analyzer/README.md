@@ -109,3 +109,37 @@ a demonstration of the methodology — not a replacement for review.
 The repository documents *how* to reason about DOM XSS. This tool encodes the
 first, mechanical half of that reasoning (locate the sources and sinks, connect
 them) so the human can spend time on the half that matters: judging exploitability.
+
+## Companion: `dxadyn` — dynamic reflection verifier
+
+`dxa` is **static**: it reads code and says *"this looks like a source → sink
+flow."* [`dxadyn.py`](dxadyn.py) is the **dynamic** other half: it drives a
+*running* target, injects a unique canary (`dxa<rand>"<dXsS>`) into every GET
+parameter and form field it discovers, and checks whether the markup comes back
+**unencoded** — turning a static guess into an evidence-backed *"reflected raw
+here"* candidate.
+
+```
+static  (dxa)     grep code for innerHTML/eval/… + source → sink taint
+dynamic (dxadyn)  send canary → read response → did the markup survive raw?
+```
+
+```bash
+python dxadyn.py http://localhost:8090/            # probe one page's inputs
+python dxadyn.py http://localhost:8090/ --depth 1  # also follow same-host links one hop
+```
+
+It classifies each reflection as **unencoded** (raw tag survived → HTML injection
+likely, HIGH), **attr-only** (a bare `"` survived → attribute breakout), or
+**encoded** (reflected but escaped → safe, not reported). Stdlib only, same
+zero-dependency ethos as `dxa`. It reports *candidates* — a raw reflection is a
+strong signal, not proof of execution; confirm each in the browser, exactly as
+with `dxa`'s HIGH findings.
+
+> ⚠️ **Authorized / local targets only** — your own instance or an in-scope
+> bug-bounty/VDP asset. `test_dxadyn.py` proves the detector on a throwaway local
+> reflector (it flags the raw echo, ignores the HTML-escaped one).
+
+**Scope of v1:** reflected reflections on the unauthenticated surface. Stored /
+authenticated flows (log in → inject into an admin field → verify it renders raw
+on another page or for another role) are the next step.
