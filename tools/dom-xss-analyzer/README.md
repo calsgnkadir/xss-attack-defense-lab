@@ -140,6 +140,36 @@ with `dxa`'s HIGH findings.
 > bug-bounty/VDP asset. `test_dxadyn.py` proves the detector on a throwaway local
 > reflector (it flags the raw echo, ignores the HTML-escaped one).
 
-**Scope of v1:** reflected reflections on the unauthenticated surface. Stored /
-authenticated flows (log in → inject into an admin field → verify it renders raw
-on another page or for another role) are the next step.
+### v2 - authenticated + stored mode
+
+`dxadyn --stored` adds the two things v1 was missing: **login** and a **two-step
+flow** (inject somewhere, verify on a different page). Together they cover the
+class that matters most for real bug-hunting: an authenticated user (Author /
+Editor) stores a payload in one place and it renders raw on a page that anyone -
+or an admin - visits later.
+
+```bash
+python dxadyn.py --stored \
+    --login http://localhost:8090/admin/login --user admin --pass labpass123 \
+    --target http://localhost:8090/admin/new-content --target-field tags \
+    --extra "title=probe,slug=dxaprobe,content=b,type=published" \
+    --check 'http://localhost:8090/tag/{CID}-dxss'
+```
+
+`--login` grabs the CSRF token and posts credentials; success = a redirect off
+the login page **or** a new session cookie. `--target` is the form to submit,
+`--target-field` is the input to inject into, `--extra` fills the other required
+fields. Each `--check` URL is then fetched and searched for the canary; `{CID}`
+in a check URL is replaced with the canary id (handy when the target slugifies
+the input into a URL, e.g. Bludit's `/tag/<slug>`).
+
+**Ground-truth validation** - `test_dxadyn.py` runs an end-to-end auth+stored
+flow against a throwaway local fixture, and the tool has been confirmed live on
+Bludit 3.16.2 (CVE-2026-4420-shaped: tags-field stored XSS → renders raw in
+`/tag/<slug>` page title, `</title>`-breakout executes in the body).
+
+> ⚠️ **Authorized only.** These flows write into the target. Use on your own
+> local instance or an in-scope bug-bounty/VDP asset. Confirm each flagged
+> reflection in the browser (does the payload actually execute in the context it
+> lands in? `<title>` reflection needs a `</title>` breakout; body reflection
+> needs the right event handler).

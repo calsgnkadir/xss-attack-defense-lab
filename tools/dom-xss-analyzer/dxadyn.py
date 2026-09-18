@@ -4,25 +4,38 @@ dxadyn - dynamic reflection verifier, the companion to dxa.
 
 dxa is *static*: it reads code and says "this looks like a source -> sink flow."
 dxadyn is *dynamic*: it drives a running target, injects a unique canary into
-every GET parameter and form field it can find, and checks whether the injected
-markup survives **unencoded** in the response. That turns dxa's "suspicious" into
-an evidence-backed "reflected unencoded here" candidate - the missing half
-between "flagged" and "confirmed."
+inputs, and checks whether the injected markup survives **unencoded** somewhere -
+in the same response (reflected) or on a later page (stored). That turns dxa's
+"suspicious" into an evidence-backed "reflected unencoded here" candidate.
 
   static  (dxa)     : grep code for innerHTML/eval/... + source -> sink taint
-  dynamic (dxadyn)  : send canary -> read response -> did the markup survive raw?
+  dynamic (dxadyn)  : send canary -> read response(s) -> did markup survive raw?
+
+Two modes:
+  reflected (default): crawl a URL, inject into every form field / GET param, check
+                       the same response.
+  stored (--stored)  : POST/GET a single form on --target, then look for the canary
+                       on each of --check URL(s). Optionally --login first.
 
 Stdlib only (no dependencies), same ethos as dxa. It reports *candidates* - a raw
-reflection is a strong signal, not a proof of execution; confirm each by hand in
-the browser (does it actually run?), exactly as with dxa's HIGH findings.
+reflection is a strong signal, not proof of execution; confirm each by hand in the
+browser (does the payload actually run?).
 
 Scope & ethics: authorized / local targets only (your own instance or an in-scope
 bug-bounty/VDP asset). Never point it at a target you are not allowed to test.
 
 Usage
 -----
-    python dxadyn.py http://localhost:8090/            # crawl one page, probe all inputs
-    python dxadyn.py http://localhost:8090/ --depth 1  # also follow same-host links one hop
+  # reflected (v1)
+  python dxadyn.py http://localhost:8090/
+  python dxadyn.py http://localhost:8090/ --depth 1
+
+  # stored, authenticated (v2)  -- Bludit tags-XSS example
+  python dxadyn.py --stored \\
+      --login http://localhost:8090/admin/login --user admin --pass labpass123 \\
+      --target http://localhost:8090/admin/new-content --target-field tags \\
+      --extra title=probe,slug=dxaprobe,content=b,type=published \\
+      --check http://localhost:8090/tag/CANARY_KEY_HERE
 """
 
 import argparse
@@ -208,13 +221,169 @@ def crawl(base_url, depth):
     return uniq
 
 
+# --- v2: authenticated + stored XSS -----------------------------------------
+
+import re
+
+
+def _extract_csrf(body, field):
+    """Grab a CSRF token value out of the login page's HTML (field name-agnostic)."""
+    m = re.search(r'name="' + re.escape(field) + r'"[^>]*value="([^"]+)"', body) \
+        or re.search(r'value="([^"]+)"[^>]*name="' + re.escape(field) + r'"', body)
+    return m.group(1) if m else None
+
+
+def _cookie_jar():
+    """Reach into OPENER for its CookieJar (installed by _opener())."""
+    for h in OPENER.handlers:
+        if isinstance(h, urllib.request.HTTPCookieProcessor):
+            return h.cookiejar
+    return None
+
+
+def login(login_url, user, password, user_field="username", pass_field="password",
+          csrf_field="tokenCSRF", extra=None):
+    """Log in through a standard HTML form. Session cookies live in `OPENER`.
+    Success = the POST either landed us on a different URL (redirect out of
+    the login page) *or* set at least one new cookie we did not have before."""
+    status, _, body = fetch(login_url)
+    if status is None:
+        return False
+
+    jar = _cookie_jar()
+    before = len(list(jar)) if jar is not None else 0
+
+    data = {user_field: user, pass_field: password}
+    tok = _extract_csrf(body, csrf_field) if csrf_field else None
+    if tok is not None:
+        data[csrf_field] = tok
+    if extra:
+        data.update(extra)
+
+    st, final_url, _ = fetch(login_url, data=data)
+    if st is None:
+        return False
+    after = len(list(jar)) if jar is not None else 0
+    return final_url != login_url or after > before
+
+
+def probe_stored(target_url, target_field, extra_fields, check_urls,
+                 method="post", csrf_field="tokenCSRF"):
+    """Submit ONE form with a canary in `target_field`, then look for the canary
+    on each URL in `check_urls`. A URL may contain the literal token `{CID}` -
+    the canary id is substituted in (useful for slug-derived pages)."""
+    cid, canary = make_canary()
+
+    # If the target page carries a CSRF token in a hidden field, pick it up.
+    tok = None
+    if csrf_field:
+        st, _, body = fetch(target_url)
+        if st is not None:
+            tok = _extract_csrf(body, csrf_field)
+
+    data = dict(extra_fields or {})
+    data[target_field] = canary
+    if tok is not None and csrf_field:
+        data[csrf_field] = tok
+
+    if method.lower() == "post":
+        sub_status, _, _ = fetch(target_url, data=data)
+    else:
+        qs = urllib.parse.urlencode(data)
+        sep = "&" if "?" in target_url else "?"
+        sub_status, _, _ = fetch(target_url + sep + qs)
+
+    out = []
+    for raw_url in check_urls:
+        url = raw_url.replace("{CID}", cid)
+        st, _, body = fetch(url)
+        v = verdict(cid, body or "")
+        if v in ("unencoded", "attr-only"):
+            out.append({"target": target_url, "field": target_field, "check_url": url,
+                        "reflection": v, "confidence": "high" if v == "unencoded" else "medium",
+                        "sub_status": sub_status, "check_status": st, "canary_id": cid})
+    return out, cid
+
+
+def _parse_kv_list(text):
+    """`a=1,b=hi,c=` -> {'a': '1', 'b': 'hi', 'c': ''} (values may not contain '=' commas)."""
+    if not text:
+        return {}
+    out = {}
+    for pair in text.split(","):
+        if "=" not in pair:
+            continue
+        k, v = pair.split("=", 1)
+        out[k.strip()] = v
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description="dynamic reflection verifier (companion to dxa)")
-    ap.add_argument("url", help="target URL (authorized/local only)")
+    ap.add_argument("url", nargs="?", help="target URL for reflected mode (authorized/local only)")
     ap.add_argument("--depth", type=int, default=0,
-                    help="follow same-host links this many hops (default 0 = the one page)")
+                    help="reflected mode: follow same-host links this many hops (default 0)")
+
+    ap.add_argument("--stored", action="store_true",
+                    help="stored mode: submit --target once, look for the canary on --check URL(s)")
+    ap.add_argument("--target", help="stored mode: URL of the form to submit")
+    ap.add_argument("--target-field", help="stored mode: form field to inject the canary into")
+    ap.add_argument("--extra", default="",
+                    help="stored mode: extra form fields, `a=1,b=hi,c=` comma-separated")
+    ap.add_argument("--method", default="post", choices=["post", "get"],
+                    help="stored mode: submission method (default post)")
+    ap.add_argument("--check", default="",
+                    help="stored mode: comma-separated URL(s) to check; `{CID}` is replaced with the canary id")
+    ap.add_argument("--csrf-field", default="tokenCSRF",
+                    help="hidden CSRF field name (default tokenCSRF); empty to disable")
+
+    ap.add_argument("--login", help="log in at this URL before probing (session persists)")
+    ap.add_argument("--user", help="username for --login")
+    ap.add_argument("--pass", dest="password", help="password for --login")
+    ap.add_argument("--user-field", default="username", help="login form username field")
+    ap.add_argument("--pass-field", default="password", help="login form password field")
+
     args = ap.parse_args()
 
+    if args.login:
+        if not (args.user and args.password):
+            print("[dxadyn] --login requires --user and --pass", file=sys.stderr)
+            sys.exit(2)
+        ok = login(args.login, args.user, args.password,
+                   user_field=args.user_field, pass_field=args.pass_field,
+                   csrf_field=args.csrf_field or None)
+        print(f"[dxadyn] login {args.login} -> {'OK' if ok else 'FAILED (continuing anyway)'}")
+
+    if args.stored:
+        if not (args.target and args.target_field and args.check):
+            print("[dxadyn] --stored requires --target, --target-field, and --check",
+                  file=sys.stderr)
+            sys.exit(2)
+        checks = [u.strip() for u in args.check.split(",") if u.strip()]
+        print(f"[dxadyn] STORED probe: {args.target} field='{args.target_field}' "
+              f"-> checking {len(checks)} URL(s) - authorized/local only\n")
+        findings, cid = probe_stored(args.target, args.target_field,
+                                     _parse_kv_list(args.extra), checks,
+                                     method=args.method,
+                                     csrf_field=args.csrf_field or "")
+        print(f"[dxadyn] canary id = {cid}")
+        if not findings:
+            print("No unencoded stored reflection on the given check URL(s).")
+            sys.exit(0)
+        for f in findings:
+            tag = "UNENCODED (HTML injection)" if f["reflection"] == "unencoded" \
+                else "attribute-breakout quote"
+            print(f"{f['check_url']}  [{f['confidence'].upper()}]  "
+                  f"stored via {f['target']} field '{f['field']}'  -> {tag}  "
+                  f"(submit HTTP {f['sub_status']}, check HTTP {f['check_status']})")
+        highs = sum(1 for f in findings if f["confidence"] == "high")
+        print(f"\n{len(findings)} stored candidate(s) - {highs} unencoded. "
+              f"Confirm each in the browser (does the payload actually execute?).")
+        sys.exit(1)
+
+    # --- reflected (v1) path ---
+    if not args.url:
+        ap.error("either a positional URL (reflected mode) or --stored is required")
     print(f"[dxadyn] probing {args.url} (depth={args.depth}) - authorized/local only\n")
     findings = crawl(args.url, args.depth)
     if not findings:
