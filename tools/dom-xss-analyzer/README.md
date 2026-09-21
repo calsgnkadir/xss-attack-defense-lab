@@ -203,3 +203,40 @@ python dxadyn.py --stored --cookie "PHPSESSID=abc123" \
 (the initial page fetch, the injection submit, the check URLs). Unit tests
 (`test_apply_cookie_rides_every_request`, `test_apply_header_parses_name_value_and_rejects_junk`)
 run a local echo server and assert the header actually arrives on the wire.
+
+### v3.2 - `--auto-check` (submit, then crawl to find where the payload landed)
+
+v2's stored mode needed `--check URL[,URL]` - the operator had to *know* which
+page would carry the payload. v3.2 removes that: after the submit, `dxadyn`
+crawls one hop out from the target's origin (plus the submit's landing page and
+any `--auto-check-from` seeds you pass), fetches each candidate, and verdicts
+every page whose body actually contains the canary id. Autonomous - no more
+guessing where the tag/comment/post shows up.
+
+```bash
+# fully autonomous - the tool finds the reflected page itself
+python dxadyn.py --stored --auto-check \
+    --login http://localhost:8090/admin/login --user admin --pass labpass123 \
+    --target http://localhost:8090/admin/new-content --target-field tags \
+    --extra "title=probe,slug=x,content=b,type=published"
+
+# hint with a URL template when the reflection page is "orphaned"
+# (linked from nowhere - Bludit's /tag/<slug> is a classic example).
+# {CID} in a seed URL is replaced with the canary id.
+python dxadyn.py --stored --auto-check \
+    --auto-check-from 'http://localhost:8090/tag/{CID}-dxss' \
+    --login ... --target ... --target-field tags --extra ...
+```
+
+Findings from auto-check are flagged with `[auto]` in the output so you can tell
+them apart from a hand-picked `--check` hit.
+
+**Live-verified on Bludit 3.16.2** — CVE-2026-4420-shaped tag-field stored XSS
+was detected end-to-end (login → submit `admin/new-content` → crawl 32 pages →
+verdict `/tag/<slug>` page unencoded). Reproduction is one command (above).
+
+**Honest limitation.** Auto-check does one hop from its seeds. If the vulnerable
+page has no inbound link anywhere in that reach (Bludit's default theme doesn't
+render `/tag/<slug>` links at all), you need to hint the URL shape with
+`--auto-check-from '.../{CID}...'`. That is not "the tool failing" - it is the
+tool being honest that it cannot conjure orphan URLs it has never seen.

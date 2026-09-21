@@ -242,6 +242,79 @@ def test_apply_header_parses_name_value_and_rejects_junk():
     assert "csrf=tok-42" in body
 
 
+# --- v3.2: auto-discover (crawl-after-submit) -------------------------------
+
+_AUTO_DB = {}
+
+
+class _AutoApp(BaseHTTPRequestHandler):
+    """Bludit-shaped: POST /post stores by slug; homepage has a link to
+    /tag/<slug> which renders the stored value raw. Auto-check must find it
+    from the homepage crawl - no explicit --check URL given."""
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def do_GET(self):
+        p = urlparse(self.path)
+        if p.path == "/":
+            links = "".join(f'<a href="/tag/{k}">{k}</a> ' for k in _AUTO_DB)
+            return self._send(200, f"<html><body>home {links}</body></html>")
+        if p.path == "/post":
+            return self._send(200, '<form method="post" action="/post">'
+                                   '<input name="tag"><input type="submit"></form>')
+        if p.path.startswith("/tag/"):
+            key = p.path.split("/", 2)[2]
+            return self._send(200, f"<h1>tag: {_AUTO_DB.get(key, '(?)')}</h1>")
+        return self._send(404, "nope")
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        fields = parse_qs(self.rfile.read(length).decode(), keep_blank_values=True)
+        if self.path == "/post":
+            tag = fields.get("tag", [""])[0]
+            key = _sluggy(tag)
+            _AUTO_DB[key] = tag                              # store raw
+            return self._send(200, f"stored key={key}")
+        return self._send(404, "nope")
+
+
+def test_auto_check_discovers_and_flags_stored_reflection():
+    _AUTO_DB.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    dxadyn.EXTRA_HEADERS.clear()
+    srv = HTTPServer(("127.0.0.1", 0), _AutoApp)
+    port = srv.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings, cid, meta = dxadyn.probe_stored_auto(
+            base + "/post", "tag", extra_fields={},
+            seed_urls=[base + "/"], csrf_field=""     # this fixture has no CSRF
+        )
+    finally:
+        srv.shutdown()
+
+    # exactly one page (the /tag/<slug>) should carry the canary raw
+    assert findings, "auto-check must locate the /tag page carrying the canary"
+    assert findings[0]["reflection"] == "unencoded"
+    assert "/tag/" in findings[0]["check_url"]
+    assert findings[0]["auto_discovered"] is True
+    assert meta["candidates"] >= 2                            # home + at least the tag page
+
+
+def test_all_links_skips_junk_and_dedupes():
+    body = '<a href="/a">A</a><a href="/a">A2</a><a href="mailto:x">M</a>' \
+           '<a href="javascript:1">J</a><a href="#top">T</a><a href="/b?x=1">B</a>'
+    got = dxadyn._all_links("http://h/", body)
+    assert got == ["http://h/a", "http://h/b?x=1"]
+
+
 def test_stored_mode_auth_and_verdict():
     _TAGS_DB.clear()
     # fresh cookie jar per test so state doesn't bleed

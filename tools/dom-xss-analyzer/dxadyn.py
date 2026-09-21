@@ -117,29 +117,36 @@ def apply_header(spec):
 
 
 def verdict(cid, body):
-    """Classify how the canary came back.
-      unencoded : the raw <dXsS> tag survived  -> HTML injection possible (HIGH)
-      attr-only : the raw " survived but not the tag -> attribute breakout (MEDIUM)
-      encoded   : the id is present but markup was escaped -> reflected & safe
-      absent    : the id is not in the response -> not reflected here
+    """Classify how the canary came back. The check inspects the char(s)
+    IMMEDIATELY after each cid occurrence - a gap between cid and the follow-on
+    means the id landed inside a slug/URL/attribute VALUE by coincidence, not
+    the raw canary payload itself. This kept auto-check from false-positiving
+    on `<a href="/tag/<cid>-dxss">` links that scanner crawls surface.
+      unencoded : cid is followed by the raw <dXsS> tag (quote may be encoded)
+      attr-only : cid is followed IMMEDIATELY by a raw quote, tag didn't survive
+      encoded   : cid is present but neither of the above
+      absent    : cid not in body
     """
-    if cid + ATTR_MARK + MARKUP in body or cid in body and MARKUP in _around(cid, body):
-        return "unencoded"
-    if cid in body and _raw_quote_after(cid, body):
-        return "attr-only"
-    if cid in body:
-        return "encoded"
-    return "absent"
-
-
-def _around(cid, body, span=40):
-    i = body.find(cid)
-    return body[i: i + len(cid) + span] if i != -1 else ""
-
-
-def _raw_quote_after(cid, body):
-    seg = _around(cid, body)
-    return ATTR_MARK in seg and '&quot;' not in seg and '&#34;' not in seg
+    if cid not in body:
+        return "absent"
+    weak = None
+    span = len(MARKUP) + 8                                    # room past &quot;
+    i = 0
+    while True:
+        j = body.find(cid, i)
+        if j == -1:
+            break
+        after = body[j + len(cid): j + len(cid) + 40]
+        # strongest signal: markup survives raw right after cid (quote or not)
+        if after.startswith(ATTR_MARK + MARKUP):
+            return "unencoded"
+        if MARKUP in after[:span]:                            # markup within a few chars
+            return "unencoded"
+        # medium: char right after cid is a raw, unescaped quote
+        if after.startswith(ATTR_MARK):
+            weak = weak or "attr-only"
+        i = j + 1
+    return weak or "encoded"
 
 
 class FormParser(HTMLParser):
@@ -339,6 +346,127 @@ def probe_stored(target_url, target_field, extra_fields, check_urls,
     return out, cid
 
 
+# --- v3.2: auto-discover check URLs (crawl after submit) --------------------
+
+class _AllLinks(HTMLParser):
+    """Collects EVERY <a href> (not just param-carrying ones). Used only by the
+    auto-check crawler; the reflected-mode probe_link path still uses the
+    parameter-only FormParser filter."""
+    def __init__(self):
+        super().__init__()
+        self.hrefs = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            for k, v in attrs:
+                if k == "href" and v:
+                    self.hrefs.append(v)
+                    break
+
+
+def _all_links(base_url, body):
+    p = _AllLinks()
+    try:
+        p.feed(body)
+    except Exception:                                        # noqa: BLE001
+        pass
+    seen, out = set(), []
+    for h in p.hrefs:
+        if h.startswith(("javascript:", "mailto:", "tel:", "#")):
+            continue
+        u = urllib.parse.urljoin(base_url, h)
+        # strip fragment; keep query (some slugs use query params)
+        u = urllib.parse.urldefrag(u)[0]
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _submit_form(target_url, target_field, extra_fields, canary,
+                 method="post", csrf_field="tokenCSRF"):
+    """Fetch the target once (to grab CSRF), then submit with the canary in
+    `target_field`. Returns (submit_status, landing_url)."""
+    tok = None
+    if csrf_field:
+        st, _, body = fetch(target_url)
+        if st is not None:
+            tok = _extract_csrf(body, csrf_field)
+    data = dict(extra_fields or {})
+    data[target_field] = canary
+    if tok is not None and csrf_field:
+        data[csrf_field] = tok
+    if method.lower() == "post":
+        st, final, _ = fetch(target_url, data=data)
+    else:
+        sep = "&" if "?" in target_url else "?"
+        st, final, _ = fetch(target_url + sep + urllib.parse.urlencode(data))
+    return st, final
+
+
+def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
+                      method="post", csrf_field="tokenCSRF", max_links=60):
+    """Submit ONE form with a canary, then autonomously hunt for the canary:
+      1. discover: fetch each seed + the submit's landing page, extract every
+         same-host link one hop out.
+      2. verify: fetch each candidate page (deduped); on any that contains the
+         canary id, run verdict() and record the unencoded / attr-only ones.
+    This is what turns dxadyn's stored mode into a real bot - no need to guess
+    where the payload will surface, just tell it where to start looking."""
+    cid, canary = make_canary()
+    sub_status, landing = _submit_form(target_url, target_field, extra_fields,
+                                       canary, method=method, csrf_field=csrf_field)
+
+    # seed set: user-supplied (with {CID} substitution) + submit landing + target origin's `/`
+    origin = urllib.parse.urlsplit(target_url)
+    root = f"{origin.scheme}://{origin.netloc}/"
+    resolved_seeds = [u.replace("{CID}", cid) for u in (seed_urls or [])]
+    seeds, seen_seeds = [], set()
+    for u in resolved_seeds + ([landing] if landing else []) + [root]:
+        if u and u not in seen_seeds:
+            seen_seeds.add(u)
+            seeds.append(u)
+
+    host = origin.netloc
+    candidates, seen = [], set()
+    for seed in seeds:
+        # the seed itself is a candidate (maybe the canary shows up there directly)
+        if seed not in seen:
+            seen.add(seed)
+            candidates.append(seed)
+        st, _, body = fetch(seed)
+        if not body or body.startswith("__error__"):
+            continue
+        for link in _all_links(seed, body):
+            if urllib.parse.urlsplit(link).netloc != host:
+                continue
+            if link in seen:
+                continue
+            seen.add(link)
+            candidates.append(link)
+            if len(candidates) >= max_links:
+                break
+        if len(candidates) >= max_links:
+            break
+
+    findings, checked = [], 0
+    for url in candidates:
+        st, _, body = fetch(url)
+        checked += 1
+        if not body or cid not in body:
+            continue
+        v = verdict(cid, body)
+        if v in ("unencoded", "attr-only"):
+            findings.append({"target": target_url, "field": target_field,
+                             "check_url": url, "reflection": v,
+                             "confidence": "high" if v == "unencoded" else "medium",
+                             "sub_status": sub_status, "check_status": st,
+                             "canary_id": cid, "auto_discovered": True})
+
+    return findings, cid, {"submit_landing": landing, "checked_pages": checked,
+                           "candidates": len(candidates)}
+
+
 def _parse_kv_list(text):
     """`a=1,b=hi,c=` -> {'a': '1', 'b': 'hi', 'c': ''} (values may not contain '=' commas)."""
     if not text:
@@ -368,6 +496,18 @@ def main():
                     help="stored mode: submission method (default post)")
     ap.add_argument("--check", default="",
                     help="stored mode: comma-separated URL(s) to check; `{CID}` is replaced with the canary id")
+    ap.add_argument("--auto-check", action="store_true",
+                    help="stored mode: don't require --check. Instead, after "
+                         "submitting, crawl one hop from the target's origin (+ "
+                         "any --auto-check-from seeds + the submit's landing "
+                         "page) and verdict every page whose body contains the "
+                         "canary. Turns stored mode into an autonomous hunter.")
+    ap.add_argument("--auto-check-from", default="",
+                    help="stored mode + --auto-check: extra seed URL(s) to "
+                         "start the crawl from, comma-separated")
+    ap.add_argument("--auto-check-max", type=int, default=60,
+                    help="stored mode + --auto-check: cap candidate pages "
+                         "(default 60)")
     ap.add_argument("--csrf-field", default="tokenCSRF",
                     help="hidden CSRF field name (default tokenCSRF); empty to disable")
 
@@ -409,25 +549,45 @@ def main():
         print(f"[dxadyn] login {args.login} -> {'OK' if ok else 'FAILED (continuing anyway)'}")
 
     if args.stored:
-        if not (args.target and args.target_field and args.check):
-            print("[dxadyn] --stored requires --target, --target-field, and --check",
+        if not (args.target and args.target_field):
+            print("[dxadyn] --stored requires --target and --target-field",
                   file=sys.stderr)
             sys.exit(2)
-        checks = [u.strip() for u in args.check.split(",") if u.strip()]
-        print(f"[dxadyn] STORED probe: {args.target} field='{args.target_field}' "
-              f"-> checking {len(checks)} URL(s) - authorized/local only\n")
-        findings, cid = probe_stored(args.target, args.target_field,
-                                     _parse_kv_list(args.extra), checks,
-                                     method=args.method,
-                                     csrf_field=args.csrf_field or "")
-        print(f"[dxadyn] canary id = {cid}")
+        if not (args.check or args.auto_check):
+            print("[dxadyn] --stored needs either --check URL[,URL] or --auto-check",
+                  file=sys.stderr)
+            sys.exit(2)
+
+        if args.auto_check:
+            seeds = [u.strip() for u in args.auto_check_from.split(",") if u.strip()]
+            print(f"[dxadyn] STORED-AUTO probe: {args.target} field='{args.target_field}' "
+                  f"-> autonomous crawl (seeds={len(seeds)+2}, max={args.auto_check_max}) "
+                  f"- authorized/local only\n")
+            findings, cid, meta = probe_stored_auto(
+                args.target, args.target_field, _parse_kv_list(args.extra),
+                seeds, method=args.method, csrf_field=args.csrf_field or "",
+                max_links=args.auto_check_max)
+            print(f"[dxadyn] canary id = {cid}")
+            print(f"[dxadyn] submit landed at: {meta['submit_landing']}")
+            print(f"[dxadyn] crawled {meta['checked_pages']}/{meta['candidates']} pages")
+        else:
+            checks = [u.strip() for u in args.check.split(",") if u.strip()]
+            print(f"[dxadyn] STORED probe: {args.target} field='{args.target_field}' "
+                  f"-> checking {len(checks)} URL(s) - authorized/local only\n")
+            findings, cid = probe_stored(args.target, args.target_field,
+                                         _parse_kv_list(args.extra), checks,
+                                         method=args.method,
+                                         csrf_field=args.csrf_field or "")
+            print(f"[dxadyn] canary id = {cid}")
+
         if not findings:
-            print("No unencoded stored reflection on the given check URL(s).")
+            print("No unencoded stored reflection found.")
             sys.exit(0)
         for f in findings:
             tag = "UNENCODED (HTML injection)" if f["reflection"] == "unencoded" \
                 else "attribute-breakout quote"
-            print(f"{f['check_url']}  [{f['confidence'].upper()}]  "
+            mode = " [auto]" if f.get("auto_discovered") else ""
+            print(f"{f['check_url']}  [{f['confidence'].upper()}]{mode}  "
                   f"stored via {f['target']} field '{f['field']}'  -> {tag}  "
                   f"(submit HTTP {f['sub_status']}, check HTTP {f['check_status']})")
         highs = sum(1 for f in findings if f["confidence"] == "high")
