@@ -15,7 +15,14 @@ Two modes:
   reflected (default): crawl a URL, inject into every form field / GET param, check
                        the same response.
   stored (--stored)  : POST/GET a single form on --target, then look for the canary
-                       on each of --check URL(s). Optionally --login first.
+                       on each of --check URL(s).
+
+Auth:
+  --login/--user/--pass : classic HTML-form login (CSRF token picked up).
+  --cookie "s=..."      : paste a session cookie from DevTools - the escape hatch
+                          for SPA / OAuth / MFA targets where a scripted form
+                          login cannot apply. Combine with --header for bearer
+                          tokens / CSRF headers.
 
 Stdlib only (no dependencies), same ethos as dxa. It reports *candidates* - a raw
 reflection is a strong signal, not proof of execution; confirm each by hand in the
@@ -67,12 +74,18 @@ def _opener():
 
 
 OPENER = _opener()
+EXTRA_HEADERS = {}          # populated by --header / --cookie CLI flags (v3.1)
 
 
 def fetch(url, data=None):
-    """GET (data=None) or POST (data=dict). Returns (status, final_url, body)."""
+    """GET (data=None) or POST (data=dict). Returns (status, final_url, body).
+    Any headers registered in EXTRA_HEADERS are attached to every request - this
+    is the hook the --cookie / --header flags use to reuse a browser session
+    against SPA/JSON targets where dxadyn's HTML-form login cannot apply."""
     body_bytes = urllib.parse.urlencode(data).encode() if data is not None else None
-    req = urllib.request.Request(url, data=body_bytes, headers={"User-Agent": UA})
+    headers = {"User-Agent": UA}
+    headers.update(EXTRA_HEADERS)                            # user-supplied wins
+    req = urllib.request.Request(url, data=body_bytes, headers=headers)
     try:
         with OPENER.open(req, timeout=15) as resp:
             return resp.status, resp.geturl(), resp.read().decode("utf-8", "ignore")
@@ -80,6 +93,27 @@ def fetch(url, data=None):
         return e.code, url, e.read().decode("utf-8", "ignore")
     except Exception as e:                                    # noqa: BLE001
         return None, url, f"__error__: {e}"
+
+
+def apply_cookie(cookie_header_value):
+    """Register a raw `Cookie:` header string (e.g. 'sid=abc; csrf=xyz') so it
+    rides every request. This is the fastest path to probing an authenticated
+    surface: log in through the target's real UI (a browser handles SPA / OAuth
+    / MFA), copy the session cookie from DevTools, paste it here."""
+    if cookie_header_value:
+        EXTRA_HEADERS["Cookie"] = cookie_header_value
+
+
+def apply_header(spec):
+    """Register a single 'Name: value' header. Repeatable via CLI --header."""
+    if not spec or ":" not in spec:
+        return False
+    name, val = spec.split(":", 1)
+    name, val = name.strip(), val.strip()
+    if not name:
+        return False
+    EXTRA_HEADERS[name] = val
+    return True
 
 
 def verdict(cid, body):
@@ -343,7 +377,27 @@ def main():
     ap.add_argument("--user-field", default="username", help="login form username field")
     ap.add_argument("--pass-field", default="password", help="login form password field")
 
+    ap.add_argument("--cookie", default="",
+                    help="raw Cookie header to attach to every request "
+                         "(paste from DevTools after logging in via the browser). "
+                         "This is the escape hatch for SPA / OAuth / MFA logins "
+                         "that dxadyn's form-based --login cannot handle.")
+    ap.add_argument("--header", action="append", default=[],
+                    help="extra header 'Name: value' (repeatable); e.g. "
+                         "--header 'Authorization: Bearer eyJ...' or "
+                         "--header 'X-CSRF-Token: abc'")
+
     args = ap.parse_args()
+
+    if args.cookie:
+        apply_cookie(args.cookie)
+        print(f"[dxadyn] session cookie attached to every request ({len(args.cookie)} chars)")
+    for spec in args.header:
+        if apply_header(spec):
+            print(f"[dxadyn] extra header set: {spec.split(':', 1)[0].strip()}")
+        else:
+            print(f"[dxadyn] --header ignored (need 'Name: value'): {spec!r}",
+                  file=sys.stderr)
 
     if args.login:
         if not (args.user and args.password):

@@ -173,3 +173,33 @@ Bludit 3.16.2 (CVE-2026-4420-shaped: tags-field stored XSS → renders raw in
 > reflection in the browser (does the payload actually execute in the context it
 > lands in? `<title>` reflection needs a `</title>` breakout; body reflection
 > needs the right event handler).
+
+### v3.1 - session import (`--cookie`, `--header`)
+
+Real modern targets increasingly ship **SPA admins that log in via a JS-driven
+JSON call** (Grav's `admin2`, most React/Vue/Svelte admin panels). Scripting
+that login is fragile - and often needs MFA / OAuth / captcha. `dxadyn` sidesteps
+that entirely: **log in through your browser once, copy the session cookie from
+DevTools, paste it in.** Every subsequent request rides that session.
+
+```bash
+# authenticated reflected probe on an admin surface, using a real browser session
+python dxadyn.py http://target/admin/settings \
+    --cookie "PHPSESSID=abc123; csrf=xyz"
+
+# same, for a bearer-token API + custom CSRF header
+python dxadyn.py http://target/dashboard \
+    --header 'Authorization: Bearer eyJ...' \
+    --header 'X-CSRF-Token: tok42'
+
+# --cookie combined with --stored to probe an authenticated stored-XSS flow
+python dxadyn.py --stored --cookie "PHPSESSID=abc123" \
+    --target http://target/admin/new-content --target-field tags \
+    --extra "title=t,type=published" \
+    --check 'http://target/tag/{CID}-dxss'
+```
+
+`--header` is repeatable. Both flags attach to **every** request `dxadyn` makes
+(the initial page fetch, the injection submit, the check URLs). Unit tests
+(`test_apply_cookie_rides_every_request`, `test_apply_header_parses_name_value_and_rejects_junk`)
+run a local echo server and assert the header actually arrives on the wire.

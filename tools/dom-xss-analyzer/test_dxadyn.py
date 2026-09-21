@@ -192,6 +192,56 @@ class _StoredApp(BaseHTTPRequestHandler):
         return self._send(404, "nope")
 
 
+# --- v3.1: cookie / header injection ----------------------------------------
+
+class _EchoHeaders(BaseHTTPRequestHandler):
+    """Reflects the incoming Cookie + selected headers so tests can assert them."""
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        cookie = self.headers.get("Cookie") or ""
+        bearer = self.headers.get("Authorization") or ""
+        csrf = self.headers.get("X-CSRF-Token") or ""
+        body = f"cookie={cookie}|auth={bearer}|csrf={csrf}"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+
+def test_apply_cookie_rides_every_request():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.apply_cookie("sid=abc123; csrf=xyz")
+    srv = HTTPServer(("127.0.0.1", 0), _EchoHeaders)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        _, _, body = dxadyn.fetch(f"http://127.0.0.1:{port}/anywhere")
+    finally:
+        srv.shutdown()
+        dxadyn.EXTRA_HEADERS.clear()
+    assert "cookie=sid=abc123; csrf=xyz" in body
+
+
+def test_apply_header_parses_name_value_and_rejects_junk():
+    dxadyn.EXTRA_HEADERS.clear()
+    assert dxadyn.apply_header("Authorization: Bearer eyJabc.def")
+    assert dxadyn.apply_header("X-CSRF-Token: tok-42")
+    assert not dxadyn.apply_header("no-colon-here")
+    assert not dxadyn.apply_header(": nokey")
+    srv = HTTPServer(("127.0.0.1", 0), _EchoHeaders)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        _, _, body = dxadyn.fetch(f"http://127.0.0.1:{port}/")
+    finally:
+        srv.shutdown()
+        dxadyn.EXTRA_HEADERS.clear()
+    assert "auth=Bearer eyJabc.def" in body
+    assert "csrf=tok-42" in body
+
+
 def test_stored_mode_auth_and_verdict():
     _TAGS_DB.clear()
     # fresh cookie jar per test so state doesn't bleed
