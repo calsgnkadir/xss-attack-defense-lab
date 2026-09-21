@@ -13,6 +13,7 @@ assessment.
 | 03 | [SQL Injection: when your input becomes part of the query](03-sql-injection.md) | SQL Injection | Finding #6 (Juice Shop) + PortSwigger Academy |
 | 04 | [Forging JWTs: `alg:none` and RS256→HS256 key confusion](04-jwt-forgery.md) | JWT / broken authentication | Juice Shop — Unsigned JWT (solved); Forged Signed JWT (attempted, not solved) |
 | 05 | [IDOR / BOLA: the server checks who you are, not what's yours](05-idor-bola.md) | Access control / IDOR / BOLA | Finding #7 (Juice Shop `/rest/basket/{id}`) |
+| 06 | [Building an XSS bot: encoding a methodology as code](06-building-an-xss-bot.md) | Tooling / automation | `dxa` + `dxadyn`; live-verified on Bludit 3.16.2 (CVE-2026-4420 shape) |
 
 > Every writeup here is backed by hands-on work on an **authorized** target:
 > OWASP Juice Shop (local Docker) or, for the field writeup (02), authorized
