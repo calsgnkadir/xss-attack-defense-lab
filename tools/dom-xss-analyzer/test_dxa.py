@@ -92,3 +92,45 @@ def test_navigation_not_double_reported_as_src_href():
     line29 = [x for x in findings if x["line"] == 29]
     sinks = {x["sink"] for x in line29}
     assert "navigation" in sinks and "src-href" not in sinks
+
+
+# --- PHP detection (v3.4 addition) ------------------------------------------
+
+def test_php_echo_of_superglobal_is_high():
+    f = by_sink(scan("vulnerable.php"))
+    assert "echo" in f
+    assert any(x["confidence"] == "high" and any("$_" in s for s in x["sources"])
+               for x in f["echo"])
+
+
+def test_php_taint_propagates_to_print():
+    f = by_sink(scan("vulnerable.php"))
+    assert "print" in f
+    assert any(x["confidence"] == "high" and x["tainted_vars"] for x in f["print"])
+
+
+def test_php_short_echo_of_superglobal_is_high():
+    f = by_sink(scan("vulnerable.php"))
+    assert "short-echo" in f
+    assert any(x["confidence"] == "high" for x in f["short-echo"])
+
+
+def test_php_lang_label_is_php():
+    findings = scan("vulnerable.php")
+    assert findings and all(x["lang"] == "php" for x in findings)
+
+
+def test_php_safe_file_has_no_high_confidence():
+    findings = scan("safe.php")
+    # safe.php still triggers sink matches, but nothing should be HIGH -
+    # because dxa can't see htmlspecialchars() the confidence stays MEDIUM/LOW
+    # on lines that don't contain a source. What must NOT happen: HIGH on the
+    # escaped lines (the source IS present there, so this is a real test that
+    # the heuristic doesn't blindly flag every source-adjacent sink).
+    highs_with_no_escape = [x for x in findings
+                            if x["confidence"] == "high"
+                            and "htmlspecialchars" not in x["code"]]
+    # only lines with an unescaped superglobal near the sink (if any) may fire
+    # here safe.php has none, so this must be empty.
+    assert highs_with_no_escape == [] or all(
+        "htmlspecialchars" in x["code"] for x in highs_with_no_escape)

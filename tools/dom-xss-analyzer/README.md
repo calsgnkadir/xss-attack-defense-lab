@@ -3,10 +3,11 @@
 [![CI](https://github.com/calsgnkadir/xss-attack-defense-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/calsgnkadir/xss-attack-defense-lab/actions/workflows/ci.yml)
 
 A small, dependency-free static linter that flags XSS sources, sinks, and the
-likely **source → sink flows** between them — on **both sides** of a web app:
+likely **source → sink flows** between them — across a full-stack surface:
 
 - **client side** — JavaScript / TypeScript (DOM XSS)
 - **server side** — C# / ASP.NET & Razor (server-rendered XSS)
+- **server side** — PHP (`echo` / `print` / `<?= ?>` / Blade `{!! !!}` / Twig `|raw`)
 
 It is the `source → sink` methodology from this repository
 ([`../../methodology.md`](../../methodology.md)) expressed as runnable code.
@@ -26,6 +27,8 @@ offending line for every finding — both JavaScript (DOM XSS) and C#/.NET.*
      `bypassSecurityTrust*`, React `dangerouslySetInnerHTML`.
    - *C# / .NET:* `@Html.Raw()`, `Response.Write()`, `new HtmlString()` /
      `MvcHtmlString`, Blazor `MarkupString`, control `.InnerHtml`.
+   - *PHP:* `echo`/`print` of a `$var`, short-echo `<?= $var ?>`, Blade
+     `{!! $x !!}` (raw), Twig `|raw`, `printf`/`vprintf`, `file_put_contents`.
 2. **Finds sources.**
    - *JavaScript:* `location.hash`/`.search`/`.href`, `document.URL`,
      `document.referrer`, `window.name`, `document.cookie`, web storage, URL
@@ -33,12 +36,19 @@ offending line for every finding — both JavaScript (DOM XSS) and C#/.NET.*
      listener).
    - *C# / .NET:* `Request.Query`/`Form`/`Params`/`Cookies`/`Headers`/`Body`,
      route values.
-3. **Taint pass (JS).** A bounded fix-point marks variables assigned from a
-   source (or from another tainted variable) as tainted. A sink that consumes a
-   tainted value, or a source directly, is raised to **HIGH confidence**; a sink
-   on a dynamic-but-untraced value is **medium**; a sink on a pure literal is
-   **low**. (C# is sink-detection with source-on-line confidence; no cross-line
+   - *PHP:* superglobals `$_GET`/`$_POST`/`$_REQUEST`/`$_COOKIE`/`$_SERVER`
+     (incl. `HTTP_*` headers)/`$_FILES`, `php://input`, Laravel
+     `Request::input(...)` / `request()->query(...)`, Symfony `$request->query`.
+3. **Taint pass (JS + PHP).** A bounded fix-point marks variables assigned from
+   a source (or from another tainted variable) as tainted. A sink that consumes
+   a tainted value, or a source directly, is raised to **HIGH confidence**; a
+   sink on a dynamic-but-untraced value is **medium**; a sink on a pure literal
+   is **low**. (C# is sink-detection with source-on-line confidence; no cross-line
    taint — kept deliberately simple and honest.)
+4. **FP squelch.** If an escape-family call (`htmlspecialchars`, `DOMPurify.sanitize`,
+   `HttpUtility.HtmlEncode`, ...) is on the same line as the sink, HIGH is
+   downgraded to MEDIUM — the value is more likely sanitised than not, and the
+   operator's attention should go to the un-escaped lines.
 
 ## Usage
 

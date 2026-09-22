@@ -104,10 +104,55 @@ CS_SOURCES = [
     ("Request.Body",    re.compile(r'\bRequest\.Body\b')),
 ]
 
+# --- PHP sinks (server-side XSS: unescaped output) --------------------------
+PHP_SINKS = [
+    ("echo",         re.compile(r'\becho\s+[^;]*\$'),
+     "high",   "echo of a variable - unescaped output is XSS unless htmlspecialchars() is applied"),
+    ("print",        re.compile(r'\bprint\s+[^;]*\$'),
+     "high",   "print of a variable - same class as echo"),
+    ("short-echo",   re.compile(r'<\?=[^?]*\$'),
+     "high",   "<?= $var ?> renders raw HTML; wrap with htmlspecialchars()"),
+    ("printf-family", re.compile(r'\b(?:v?printf)\s*\('),
+     "medium", "printf/vprintf can render dynamic content unescaped"),
+    ("blade-raw",    re.compile(r'\{!!'),
+     "high",   "Laravel Blade {!! !!} disables escaping (the safe form is {{ }})"),
+    ("twig-raw",     re.compile(r'\|\s*raw\b'),
+     "medium", "Twig |raw filter disables escaping"),
+    ("file_put_contents", re.compile(r'\bfile_put_contents\s*\('),
+     "low",    "file_put_contents may store attacker HTML that is later rendered raw"),
+]
+PHP_SOURCES = [
+    ("$_GET",         re.compile(r'\$_GET\b')),
+    ("$_POST",        re.compile(r'\$_POST\b')),
+    ("$_REQUEST",     re.compile(r'\$_REQUEST\b')),
+    ("$_COOKIE",      re.compile(r'\$_COOKIE\b')),
+    ("$_SERVER",      re.compile(r'\$_SERVER\b')),                # incl. HTTP_* headers
+    ("$_FILES",       re.compile(r'\$_FILES\b')),
+    ("php://input",   re.compile(r'php://input')),
+    ("Laravel-Request", re.compile(r'\bRequest::(?:input|all|get|post|query|cookie|header)\b|'
+                                    r'\brequest\(\)\s*->\s*(?:input|all|get|post|query|cookie|header)\b')),
+    ("Symfony-Request", re.compile(r'\$request\s*->\s*(?:query|request|cookies|headers|files|attributes)\b')),
+]
+
 ASSIGN = re.compile(r'^\s*(?:var|let|const)?\s*([A-Za-z_$][\w$]*)\s*=\s*(.+?)\s*;?\s*$')
+PHP_ASSIGN = re.compile(r'^\s*(\$[A-Za-z_]\w*)\s*=\s*(.+?)\s*;?\s*$')
+# Escape-family calls that, if present on the same line as a source+sink,
+# strongly suggest the value was sanitised before hitting the sink. We can't
+# prove it (no AST), but we can DOWNGRADE HIGH -> MEDIUM to avoid the obvious
+# false positive. Keys are per-language; JS/C# have their own list.
+PHP_ESCAPES = re.compile(
+    r'\b(?:htmlspecialchars|htmlentities|esc_html|esc_attr|esc_url|esc_js|'
+    r'strip_tags|filter_var)\s*\(')
+JS_ESCAPES = re.compile(
+    r'\b(?:DOMPurify\.sanitize|sanitizeHtml|encodeURIComponent|encodeURI|'
+    r'escapeHtml|textContent\s*=)')
+CS_ESCAPES = re.compile(
+    r'\b(?:HtmlEncoder\.(?:Default\.)?Encode|Html\.Encode|HttpUtility\.'
+    r'HtmlEncode|WebUtility\.HtmlEncode|@\s*Html\.Encode)\s*\(')
 CONF_RANK = {"low": 0, "medium": 1, "high": 2}
 JS_EXT = (".js", ".ts", ".jsx", ".tsx", ".mjs")
 CS_EXT = (".cs", ".cshtml", ".razor")
+PHP_EXT = (".php", ".phtml", ".php3", ".php4", ".php5", ".phps", ".inc")
 
 
 def source_hits(text, sources, msg_active):
@@ -126,19 +171,21 @@ def source_hits(text, sources, msg_active):
     return hits
 
 
-def compute_taint(lines, sources, msg_active):
-    """JS only: a var is tainted if assigned from a source or another tainted
-    var. Bounded fix-point - a cheap approximation of straight-line data flow."""
+def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
+    """A var is tainted if assigned from a source or another tainted var.
+    Bounded fix-point - a cheap approximation of straight-line data flow.
+    Runs on both JS (variable-name identifiers) and PHP (`$name` identifiers);
+    the caller picks the assign regex to match the target language."""
     tainted = set()
     for _ in range(6):
         changed = False
         for line in lines:
-            m = ASSIGN.match(line)
+            m = assign_re.match(line)
             if not m:
                 continue
             lhs, rhs = m.group(1), m.group(2)
             if source_hits(rhs, sources, msg_active) or any(
-                re.search(r'\b' + re.escape(v) + r'\b', rhs) for v in tainted
+                re.search(r'(?<!\w)' + re.escape(v) + r'\b', rhs) for v in tainted
             ):
                 if lhs not in tainted:
                     tainted.add(lhs)
@@ -148,10 +195,19 @@ def compute_taint(lines, sources, msg_active):
     return tainted
 
 
-def scan_file(path):
+def _lang_for(path):
+    """Return (lang, sinks, sources, assign_re, wants_taint). lang is one of
+    'js', 'cs', 'php'; wants_taint tells scan_file whether to run compute_taint."""
     ext = os.path.splitext(path)[1].lower()
-    is_js = ext in JS_EXT
-    sinks, sources = (JS_SINKS, JS_SOURCES) if is_js else (CS_SINKS, CS_SOURCES)
+    if ext in JS_EXT:
+        return "js", JS_SINKS, JS_SOURCES, ASSIGN, True
+    if ext in PHP_EXT:
+        return "php", PHP_SINKS, PHP_SOURCES, PHP_ASSIGN, True
+    return "cs", CS_SINKS, CS_SOURCES, ASSIGN, False
+
+
+def scan_file(path):
+    lang, sinks, sources, assign_re, wants_taint = _lang_for(path)
 
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
@@ -159,8 +215,9 @@ def scan_file(path):
     except OSError:
         return []
 
-    msg_active = is_js and bool(MSG_LISTENER.search("\n".join(lines)))
-    tainted = compute_taint(lines, sources, msg_active) if is_js else set()
+    msg_active = lang == "js" and bool(MSG_LISTENER.search("\n".join(lines)))
+    tainted = (compute_taint(lines, sources, msg_active, assign_re)
+               if wants_taint else set())
     dynamic = re.compile(r'[A-Za-z_$@][\w$]*')
 
     findings = []
@@ -173,15 +230,26 @@ def scan_file(path):
             if sid == "src-href" and "navigation" in matched_here:
                 continue
             srcs = source_hits(line, sources, msg_active)
-            tvars = [v for v in tainted if re.search(r'\b' + re.escape(v) + r'\b', line)]
+            tvars = [v for v in tainted
+                     if re.search(r'(?<!\w)' + re.escape(v) + r'\b', line)]
             if srcs or tvars:
                 confidence = "high"
             elif dynamic.search(line.split("//", 1)[0]):
                 confidence = "medium"
             else:
                 confidence = "low"
+            # False-positive squelch: if an escape-family call appears on the
+            # same line as the sink (htmlspecialchars, DOMPurify, HtmlEncode...),
+            # we can't prove it wrapped the source, but it's much more likely
+            # sanitised than not - downgrade HIGH -> MEDIUM so the operator
+            # spends time on the un-escaped cases.
+            if confidence == "high":
+                esc_re = (PHP_ESCAPES if lang == "php"
+                          else JS_ESCAPES if lang == "js" else CS_ESCAPES)
+                if esc_re.search(line):
+                    confidence = "medium"
             findings.append({
-                "file": path, "line": lineno, "sink": sid, "lang": "js" if is_js else "cs",
+                "file": path, "line": lineno, "sink": sid, "lang": lang,
                 "severity": severity, "confidence": confidence, "description": desc,
                 "code": line.strip()[:200], "sources": srcs, "tainted_vars": tvars,
             })
@@ -193,10 +261,10 @@ def iter_files(target):
         yield target
         return
     for root, _, files in os.walk(target):
-        if "node_modules" in root or os.sep + ".git" in root:
+        if "node_modules" in root or "vendor" in root or os.sep + ".git" in root:
             continue
         for name in files:
-            if name.endswith(JS_EXT + CS_EXT):
+            if name.endswith(JS_EXT + CS_EXT + PHP_EXT):
                 yield os.path.join(root, name)
 
 
