@@ -289,6 +289,33 @@ def test_probe_headers_leaves_no_lingering_headers():
     assert "X-Forwarded-For" not in dxadyn.EXTRA_HEADERS
 
 
+# --- HTML report ------------------------------------------------------------
+
+def test_render_html_empty_produces_valid_page():
+    out = dxadyn.render_html([], "http://x/", "reflected", {"depth": "0"})
+    assert "<title>dxadyn report" in out
+    assert "No unencoded reflections found" in out
+    assert "http://x/" in out
+
+
+def test_render_html_with_findings_shows_row_and_badges():
+    findings = [
+        {"url": "http://x/", "method": "GET", "param": "q",
+         "reflection": "unencoded", "confidence": "high", "status": 200,
+         "origin": "reflected"},
+        {"check_url": "http://x/tag/z", "field": "tags",
+         "reflection": "attr-only", "confidence": "medium",
+         "sub_status": 200, "check_status": 200, "auto_discovered": True},
+    ]
+    out = dxadyn.render_html(findings, "http://x/", "stored-auto",
+                             {"canary_id": "dxa12345"})
+    assert "unencoded" in out and "attr-only" in out
+    assert "reflected" in out and "stored-auto" in out
+    assert "dxa12345" in out
+    # header row and both data rows
+    assert out.count("<tr>") >= 3
+
+
 # --- v3.4: JSON body + stored header target ---------------------------------
 
 _V34_DB = {"json": None, "hdr": None}

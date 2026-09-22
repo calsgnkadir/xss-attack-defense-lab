@@ -289,6 +289,17 @@ python dxadyn.py http://target/dashboard --cookie "sid=..." \
 - Both features have unit tests (`test_dxa2dyn.py`, `test_probe_headers_*`) that
   run a local echo/reflector server and assert raw vs escaped is told apart.
 
+### `--html FILE` — visual report (any mode)
+
+Every dxadyn run — reflected, `--stored`, `--auto-check`, `--json-body`,
+`--header-target` — can also emit a **self-contained HTML report** with
+`--html report.html`. Same dark GitHub-ish visual language as `dxa`'s HTML
+report, so the pair look like one product: severity/confidence badges, the
+origin of each finding (`reflected` / `stored` / `stored-auto`), the target
+URL, the parameter/field/header the canary went in on, and the HTTP status
+of both submit and check. A `dxadyn-report-preview.html` sits next to this
+README as a live sample (generated against Bludit 3.16.2's tag stored XSS).
+
 ### v3.4 - `--json-body` and `--stored --header-target`
 
 Stored mode's `--target-field` shape covered classic HTML forms. v3.4 adds the

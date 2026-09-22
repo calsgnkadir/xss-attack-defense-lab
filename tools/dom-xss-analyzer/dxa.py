@@ -239,15 +239,20 @@ def scan_file(path):
             else:
                 confidence = "low"
             # False-positive squelch: if an escape-family call appears on the
-            # same line as the sink (htmlspecialchars, DOMPurify, HtmlEncode...),
-            # we can't prove it wrapped the source, but it's much more likely
-            # sanitised than not - downgrade HIGH -> MEDIUM so the operator
-            # spends time on the un-escaped cases.
-            if confidence == "high":
+            # same line as the sink AND close to it (within ~200 chars, i.e.
+            # plausibly wrapping the sink's value), downgrade HIGH -> MEDIUM.
+            # Proximity matters - on a minified single-line blob a stray
+            # `encodeURIComponent` far away from the sink says nothing about
+            # THIS sink's value. Long lines (> 500 chars, i.e. minified) skip
+            # the squelch entirely: they need eyes-on review anyway.
+            if confidence == "high" and len(line) <= 500:
                 esc_re = (PHP_ESCAPES if lang == "php"
                           else JS_ESCAPES if lang == "js" else CS_ESCAPES)
-                if esc_re.search(line):
-                    confidence = "medium"
+                sink_pos = rx.search(line).start()
+                for em in esc_re.finditer(line):
+                    if abs(em.start() - sink_pos) <= 200:
+                        confidence = "medium"
+                        break
             findings.append({
                 "file": path, "line": lineno, "sink": sid, "lang": lang,
                 "severity": severity, "confidence": confidence, "description": desc,

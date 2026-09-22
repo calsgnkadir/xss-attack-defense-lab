@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>dxadyn report - http://localhost:8090/admin/new-content</title>
+<style>
+ body{font-family:system-ui,Arial,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:28px}
+ h1{font-size:20px;margin:0 0 4px} .sub{color:#8b949e;font-size:13px;margin-bottom:12px}
+ .stats{display:flex;gap:14px;margin:18px 0 12px;flex-wrap:wrap}
+ .stat{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 16px;min-width:110px}
+ .stat .n{font-size:22px;font-weight:700} .stat .l{color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+ .meta{list-style:none;padding:10px 14px;margin:0 0 18px;background:#161b22;border:1px solid #30363d;border-radius:8px;font-size:13px}
+ .meta li{margin:2px 0} .meta b{color:#8b949e;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.5px}
+ table{width:100%;border-collapse:collapse;font-size:13px}
+ th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #21262d;vertical-align:top}
+ th{color:#8b949e;text-transform:uppercase;font-size:11px;letter-spacing:.5px}
+ .badge{color:#0d1117;font-weight:700;font-size:11px;padding:2px 8px;border-radius:10px;text-transform:uppercase}
+ .mono{font-family:ui-monospace,Consolas,monospace} .muted{color:#8b949e}
+ .small{font-size:11px} .url{word-break:break-all;color:#79c0ff}
+ .warn{background:#3d1d0a;border:1px solid #d29922;color:#e6edf3;padding:8px 12px;border-radius:6px;margin:14px 0;font-size:12px}
+ footer{color:#8b949e;font-size:12px;margin-top:22px}
+</style>
+<h1>dxadyn - dynamic XSS report</h1>
+<div class="sub">target: <span class="mono">http://localhost:8090/admin/new-content</span> &middot; mode: <span class="mono">stored-auto</span> &middot; generated: 2026-09-22 13:33</div>
+<ul class='meta'><li><b>target:</b> <span class='mono'>http://localhost:8090/admin/new-content</span></li><li><b>shape:</b> <span class='mono'>field=&#x27;tags&#x27;</span></li><li><b>canary_id:</b> <span class='mono'>dxa0d728ed4</span></li></ul>
+<div class="stats">
+ <div class="stat"><div class="n">1</div><div class="l">candidates</div></div>
+ <div class="stat"><div class="n" style="color:#f85149">1</div><div class="l">high confidence</div></div>
+</div>
+<div class='warn'>Reflection is not proof of execution &mdash; confirm each HIGH in the browser (the surrounding HTML context decides whether the payload actually runs).</div>
+<table>
+ <tr><th>conf</th><th>reflection</th><th>origin</th><th>method</th><th>param</th><th>url</th><th>status</th></tr>
+ <tr><td><span class='badge' style='background:#f85149'>HIGH</span></td><td><span class='badge' style='background:#f85149'>unencoded</span></td><td class='mono'>stored-auto</td><td class='mono'>stored</td><td class='mono'>tags</td><td class='mono muted url'>http://localhost:8090/tag/dxa0d728ed4-dxss</td><td class='muted small'>submit HTTP 200, check HTTP 200</td></tr>
+</table>
+<footer>dxadyn - deterministic dynamic XSS verifier. Companion of <span class='mono'>dxa</span>. Authorized targets only.</footer>

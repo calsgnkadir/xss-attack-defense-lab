@@ -46,6 +46,7 @@ Usage
 """
 
 import argparse
+import datetime
 import html as htmllib
 import http.cookiejar
 import secrets
@@ -537,6 +538,93 @@ def probe_headers(url, header_names):
     return findings
 
 
+def render_html(findings, target, mode, meta=None):
+    """Self-contained HTML report - no external assets. Same visual language as
+    dxa's report (dark GitHub-ish theme, severity/confidence badges) so the two
+    tools' outputs feel like one product. `meta` is a dict of extra context
+    lines to print in the sub-header (submit landing, pages crawled, ...)."""
+    def esc(s):
+        return htmllib.escape(str(s))
+
+    color = {"high": "#f85149", "medium": "#d29922", "low": "#8b949e",
+             "unencoded": "#f85149", "attr-only": "#d29922"}
+    total = len(findings)
+    highs = sum(1 for f in findings if f.get("confidence") == "high")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    rows = []
+    for f in findings:
+        # findings may come from reflected (crawl/link/header) or stored modes.
+        # Normalise the display fields.
+        param = f.get("param") or f.get("field") or "-"
+        url = f.get("check_url") or f.get("url") or "-"
+        method = f.get("method") or ("stored" if "field" in f else "GET")
+        refl = f.get("reflection", "-")
+        conf = f.get("confidence", "-")
+        origin = f.get("origin") or (
+            "stored-auto" if f.get("auto_discovered") else
+            "stored" if "check_url" in f else "reflected")
+        sub_st = f.get("sub_status")
+        chk_st = f.get("check_status") or f.get("status")
+        status = f"submit HTTP {sub_st}, check HTTP {chk_st}" if sub_st is not None \
+            else f"HTTP {chk_st}"
+        rows.append(
+            "<tr>"
+            f"<td><span class='badge' style='background:{color.get(conf,'#8b949e')}'>"
+            f"{esc(conf.upper())}</span></td>"
+            f"<td><span class='badge' style='background:{color.get(refl,'#8b949e')}'>"
+            f"{esc(refl)}</span></td>"
+            f"<td class='mono'>{esc(origin)}</td>"
+            f"<td class='mono'>{esc(method)}</td>"
+            f"<td class='mono'>{esc(param)}</td>"
+            f"<td class='mono muted url'>{esc(url)}</td>"
+            f"<td class='muted small'>{esc(status)}</td>"
+            "</tr>"
+        )
+
+    meta_html = ""
+    if meta:
+        meta_html = "<ul class='meta'>" + "".join(
+            f"<li><b>{esc(k)}:</b> <span class='mono'>{esc(v)}</span></li>"
+            for k, v in meta.items() if v is not None
+        ) + "</ul>"
+
+    return f"""<!doctype html>
+<meta charset="utf-8">
+<title>dxadyn report - {esc(target)}</title>
+<style>
+ body{{font-family:system-ui,Arial,sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:28px}}
+ h1{{font-size:20px;margin:0 0 4px}} .sub{{color:#8b949e;font-size:13px;margin-bottom:12px}}
+ .stats{{display:flex;gap:14px;margin:18px 0 12px;flex-wrap:wrap}}
+ .stat{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 16px;min-width:110px}}
+ .stat .n{{font-size:22px;font-weight:700}} .stat .l{{color:#8b949e;font-size:12px;text-transform:uppercase;letter-spacing:.5px}}
+ .meta{{list-style:none;padding:10px 14px;margin:0 0 18px;background:#161b22;border:1px solid #30363d;border-radius:8px;font-size:13px}}
+ .meta li{{margin:2px 0}} .meta b{{color:#8b949e;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.5px}}
+ table{{width:100%;border-collapse:collapse;font-size:13px}}
+ th,td{{text-align:left;padding:9px 10px;border-bottom:1px solid #21262d;vertical-align:top}}
+ th{{color:#8b949e;text-transform:uppercase;font-size:11px;letter-spacing:.5px}}
+ .badge{{color:#0d1117;font-weight:700;font-size:11px;padding:2px 8px;border-radius:10px;text-transform:uppercase}}
+ .mono{{font-family:ui-monospace,Consolas,monospace}} .muted{{color:#8b949e}}
+ .small{{font-size:11px}} .url{{word-break:break-all;color:#79c0ff}}
+ .warn{{background:#3d1d0a;border:1px solid #d29922;color:#e6edf3;padding:8px 12px;border-radius:6px;margin:14px 0;font-size:12px}}
+ footer{{color:#8b949e;font-size:12px;margin-top:22px}}
+</style>
+<h1>dxadyn - dynamic XSS report</h1>
+<div class="sub">target: <span class="mono">{esc(target)}</span> &middot; mode: <span class="mono">{esc(mode)}</span> &middot; generated: {esc(ts)}</div>
+{meta_html}
+<div class="stats">
+ <div class="stat"><div class="n">{total}</div><div class="l">candidates</div></div>
+ <div class="stat"><div class="n" style="color:{color['high']}">{highs}</div><div class="l">high confidence</div></div>
+</div>
+{"<div class='warn'>Reflection is not proof of execution &mdash; confirm each HIGH in the browser (the surrounding HTML context decides whether the payload actually runs).</div>" if findings else ""}
+<table>
+ <tr><th>conf</th><th>reflection</th><th>origin</th><th>method</th><th>param</th><th>url</th><th>status</th></tr>
+ {"".join(rows) if rows else "<tr><td colspan=7 class='muted'>No unencoded reflections found. (Inputs may be encoded, POST-guarded, or absent.)</td></tr>"}
+</table>
+<footer>dxadyn - deterministic dynamic XSS verifier. Companion of <span class='mono'>dxa</span>. Authorized targets only.</footer>
+"""
+
+
 def _parse_kv_list(text):
     """`a=1,b=hi,c=` -> {'a': '1', 'b': 'hi', 'c': ''} (values may not contain '=' commas)."""
     if not text:
@@ -602,6 +690,9 @@ def main():
     ap.add_argument("--user-field", default="username", help="login form username field")
     ap.add_argument("--pass-field", default="password", help="login form password field")
 
+    ap.add_argument("--html", metavar="FILE", default="",
+                    help="also write a self-contained HTML report to FILE "
+                         "(same visual language as dxa's HTML report)")
     ap.add_argument("--cookie", default="",
                     help="raw Cookie header to attach to every request "
                          "(paste from DevTools after logging in via the browser). "
@@ -679,6 +770,16 @@ def main():
                                          header_target=args.header_target or None)
             print(f"[dxadyn] canary id = {cid}")
 
+        if args.html:
+            mode = "stored-auto" if args.auto_check else "stored"
+            meta = {"target": args.target, "shape": shape_desc,
+                    "canary_id": cid}
+            if args.auto_check:
+                meta["submit_landing"] = meta.get("submit_landing")
+            with open(args.html, "w", encoding="utf-8") as fh:
+                fh.write(render_html(findings, args.target, mode, meta))
+            print(f"[dxadyn] HTML report -> {args.html}")
+
         if not findings:
             print("No unencoded stored reflection found.")
             sys.exit(0)
@@ -703,6 +804,15 @@ def main():
         hdrs = [h.strip() for h in args.probe_headers.split(",") if h.strip()]
         print(f"[dxadyn] header probe: {', '.join(hdrs)}")
         findings += probe_headers(args.url, hdrs)
+
+    if args.html:
+        meta = {"depth": str(args.depth)}
+        if args.probe_headers:
+            meta["probe_headers"] = args.probe_headers
+        with open(args.html, "w", encoding="utf-8") as fh:
+            fh.write(render_html(findings, args.url, "reflected", meta))
+        print(f"[dxadyn] HTML report -> {args.html}")
+
     if not findings:
         print("No unencoded reflections found. (Inputs may be encoded, POST-guarded, or absent.)")
         sys.exit(0)
