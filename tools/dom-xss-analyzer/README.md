@@ -240,3 +240,42 @@ page has no inbound link anywhere in that reach (Bludit's default theme doesn't
 render `/tag/<slug>` links at all), you need to hint the URL shape with
 `--auto-check-from '.../{CID}...'`. That is not "the tool failing" - it is the
 tool being honest that it cannot conjure orphan URLs it has never seen.
+
+### v3.3 - `dxa2dyn` bridge + `--probe-headers`
+
+Two additions turn the pair into an integrated bot:
+
+**`dxa2dyn.py` - static -> dynamic bridge.** Runs `dxa` on a codebase, pulls
+likely HTTP parameter names out of its HIGH-confidence findings (Express
+`req.query.q`, Django-ish `request.form['x']`, .NET `Request.QueryString["y"]`,
+`URLSearchParams.get('z')` ...), then drives `dxadyn` against a running URL,
+adding those hinted parameters as targeted GET probes on top of the parameters
+`dxadyn` discovers by crawling. One command, both lenses.
+
+```bash
+python dxa2dyn.py ./app/routes http://localhost:3000/ \
+    --cookie "sid=..." --header 'X-CSRF: tok'
+```
+
+**`--probe-headers "H1,H2,..."`** — reflected-mode add-on that sends the target
+URL once per named header, each carrying a canary, and verdicts the response.
+Catches the class of header-injection reflection (`X-Forwarded-For`,
+`True-Client-IP`, `Referer`, `User-Agent` written into a page). This is
+Finding #8's shape from this repo's Juice Shop assessment, but caught by an
+automated probe.
+
+```bash
+python dxadyn.py http://target/dashboard --cookie "sid=..." \
+    --probe-headers "True-Client-IP,X-Forwarded-For,Referer,User-Agent"
+```
+
+**Honest scope of v3.3:**
+- `dxa2dyn`'s static side is JS/TS + C#/.NET only (that's `dxa`'s scope).
+  Bludit's PHP source, for example, yields zero JS/C# hits - the bridge then
+  falls back to `dxadyn`'s own crawl discovery. PHP support belongs in a future
+  `dxa` extension.
+- `--probe-headers` catches **reflected** header XSS (single response). The
+  Bludit `True-Client-IP` → Last Login IP path is **stored + two-step** and
+  would need a `--stored --header-target ...` combo; that's a v3.4 item.
+- Both features have unit tests (`test_dxa2dyn.py`, `test_probe_headers_*`) that
+  run a local echo/reflector server and assert raw vs escaped is told apart.

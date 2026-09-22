@@ -242,6 +242,53 @@ def test_apply_header_parses_name_value_and_rejects_junk():
     assert "csrf=tok-42" in body
 
 
+# --- v3.3 bonus: header-injection probe (Bludit Finding #8 shape) -----------
+
+class _HeaderEcho(BaseHTTPRequestHandler):
+    """Echoes X-Forwarded-For raw (vuln), Referer HTML-escaped (safe)."""
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        xff = self.headers.get("X-Forwarded-For", "")
+        ref = self.headers.get("Referer", "")
+        body = f"<p>ip={xff}</p><p>ref={html.escape(ref)}</p>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+
+def test_probe_headers_flags_raw_and_ignores_escaped():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _HeaderEcho)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings = dxadyn.probe_headers(
+            f"http://127.0.0.1:{port}/", ["X-Forwarded-For", "Referer"])
+    finally:
+        srv.shutdown()
+    flagged = {(f["param"], f["reflection"]) for f in findings}
+    assert ("header:X-Forwarded-For", "unencoded") in flagged
+    assert not any(p == "header:Referer" for p, _ in flagged)
+
+
+def test_probe_headers_leaves_no_lingering_headers():
+    """Regression: EXTRA_HEADERS must not keep the last canary header set."""
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _HeaderEcho)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        dxadyn.probe_headers(f"http://127.0.0.1:{port}/", ["X-Forwarded-For"])
+    finally:
+        srv.shutdown()
+    assert "X-Forwarded-For" not in dxadyn.EXTRA_HEADERS
+
+
 # --- v3.2: auto-discover (crawl-after-submit) -------------------------------
 
 _AUTO_DB = {}

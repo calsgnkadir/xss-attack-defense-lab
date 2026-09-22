@@ -467,6 +467,31 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
                            "candidates": len(candidates)}
 
 
+def probe_headers(url, header_names):
+    """Send `url` once per header in `header_names`, each carrying a fresh
+    canary in that header value, and verdict the response. Catches the class
+    of stored/reflected XSS where an app writes an incoming header (e.g.
+    X-Forwarded-For, True-Client-IP, Referer, User-Agent) into a page - Bludit's
+    Finding #8 in this repo is the canonical example."""
+    findings = []
+    for name in header_names:
+        cid, canary = make_canary()
+        EXTRA_HEADERS[name] = canary
+        try:
+            status, _, body = fetch(url)
+        finally:
+            EXTRA_HEADERS.pop(name, None)
+        v = verdict(cid, body or "")
+        if v in ("unencoded", "attr-only"):
+            findings.append({
+                "url": url, "method": "GET", "param": f"header:{name}",
+                "reflection": v,
+                "confidence": "high" if v == "unencoded" else "medium",
+                "status": status,
+            })
+    return findings
+
+
 def _parse_kv_list(text):
     """`a=1,b=hi,c=` -> {'a': '1', 'b': 'hi', 'c': ''} (values may not contain '=' commas)."""
     if not text:
@@ -485,6 +510,10 @@ def main():
     ap.add_argument("url", nargs="?", help="target URL for reflected mode (authorized/local only)")
     ap.add_argument("--depth", type=int, default=0,
                     help="reflected mode: follow same-host links this many hops (default 0)")
+    ap.add_argument("--probe-headers", default="",
+                    help="reflected mode: comma-separated header names to inject "
+                         "a canary into (e.g. 'X-Forwarded-For,True-Client-IP,"
+                         "Referer,User-Agent'). Catches header-XSS.")
 
     ap.add_argument("--stored", action="store_true",
                     help="stored mode: submit --target once, look for the canary on --check URL(s)")
@@ -600,6 +629,10 @@ def main():
         ap.error("either a positional URL (reflected mode) or --stored is required")
     print(f"[dxadyn] probing {args.url} (depth={args.depth}) - authorized/local only\n")
     findings = crawl(args.url, args.depth)
+    if args.probe_headers:
+        hdrs = [h.strip() for h in args.probe_headers.split(",") if h.strip()]
+        print(f"[dxadyn] header probe: {', '.join(hdrs)}")
+        findings += probe_headers(args.url, hdrs)
     if not findings:
         print("No unencoded reflections found. (Inputs may be encoded, POST-guarded, or absent.)")
         sys.exit(0)
