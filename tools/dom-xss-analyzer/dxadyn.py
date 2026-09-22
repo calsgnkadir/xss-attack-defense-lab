@@ -308,39 +308,43 @@ def login(login_url, user, password, user_field="username", pass_field="password
     return final_url != login_url or after > before
 
 
+def _do_submit(target_url, target_field, extra_fields, canary,
+               method="post", csrf_field="tokenCSRF",
+               json_body=None, header_target=None):
+    """Dispatch to the right submit style for stored mode. Exactly one of the
+    three shapes is used (form / json / header)."""
+    if json_body is not None:
+        return _submit_json(target_url, json_body, canary)
+    if header_target:
+        return _submit_header(target_url, header_target, canary, method=method)
+    return _submit_form(target_url, target_field, extra_fields, canary,
+                        method=method, csrf_field=csrf_field)
+
+
 def probe_stored(target_url, target_field, extra_fields, check_urls,
-                 method="post", csrf_field="tokenCSRF"):
-    """Submit ONE form with a canary in `target_field`, then look for the canary
-    on each URL in `check_urls`. A URL may contain the literal token `{CID}` -
-    the canary id is substituted in (useful for slug-derived pages)."""
+                 method="post", csrf_field="tokenCSRF",
+                 json_body=None, header_target=None):
+    """Submit ONE payload with a canary, then look for the canary on each URL
+    in `check_urls`. Shape of the submission:
+      form  (default)     - `target_field` in a POST/GET form body
+      json  (json_body)   - `{CANARY}` in a JSON template posted to target_url
+      header (header_target) - canary in the named request header
+    A check URL may contain the literal token `{CID}` - the canary id is
+    substituted in (useful for slug-derived pages)."""
     cid, canary = make_canary()
+    sub_status, _ = _do_submit(target_url, target_field, extra_fields, canary,
+                               method=method, csrf_field=csrf_field,
+                               json_body=json_body, header_target=header_target)
 
-    # If the target page carries a CSRF token in a hidden field, pick it up.
-    tok = None
-    if csrf_field:
-        st, _, body = fetch(target_url)
-        if st is not None:
-            tok = _extract_csrf(body, csrf_field)
-
-    data = dict(extra_fields or {})
-    data[target_field] = canary
-    if tok is not None and csrf_field:
-        data[csrf_field] = tok
-
-    if method.lower() == "post":
-        sub_status, _, _ = fetch(target_url, data=data)
-    else:
-        qs = urllib.parse.urlencode(data)
-        sep = "&" if "?" in target_url else "?"
-        sub_status, _, _ = fetch(target_url + sep + qs)
-
+    label = (f"header:{header_target}" if header_target else
+             ("json" if json_body is not None else target_field))
     out = []
     for raw_url in check_urls:
         url = raw_url.replace("{CID}", cid)
         st, _, body = fetch(url)
         v = verdict(cid, body or "")
         if v in ("unencoded", "attr-only"):
-            out.append({"target": target_url, "field": target_field, "check_url": url,
+            out.append({"target": target_url, "field": label, "check_url": url,
                         "reflection": v, "confidence": "high" if v == "unencoded" else "medium",
                         "sub_status": sub_status, "check_status": st, "canary_id": cid})
     return out, cid
@@ -404,18 +408,57 @@ def _submit_form(target_url, target_field, extra_fields, canary,
     return st, final
 
 
+def _fetch_json(url, body_bytes):
+    """POST a JSON body. Same shape as fetch() but sets Content-Type + raw body."""
+    headers = {"User-Agent": UA, "Content-Type": "application/json"}
+    headers.update(EXTRA_HEADERS)
+    req = urllib.request.Request(url, data=body_bytes, headers=headers)
+    try:
+        with OPENER.open(req, timeout=15) as resp:
+            return resp.status, resp.geturl(), resp.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as e:
+        return e.code, url, e.read().decode("utf-8", "ignore")
+    except Exception as e:                                    # noqa: BLE001
+        return None, url, f"__error__: {e}"
+
+
+def _submit_json(target_url, json_template, canary):
+    """POST the given JSON template to target_url after substituting {CANARY}
+    (and its JSON-string-safe variant) with the actual canary value. Returns
+    (submit_status, landing_url). This is v3.4's escape hatch for SPA / REST
+    admins (Grav-style)."""
+    # {CANARY} inside a JSON string must be JSON-escaped (backslash + quote)
+    safe = json_template.replace("{CANARY}", canary
+        .replace("\\", "\\\\").replace('"', '\\"'))
+    st, final, _ = _fetch_json(target_url, safe.encode("utf-8"))
+    return st, final
+
+
+def _submit_header(target_url, header_name, canary, method="get"):
+    """Send target_url once with `canary` in `header_name`. Returns
+    (submit_status, landing_url). The header is registered on EXTRA_HEADERS
+    for the duration of the request, then popped so it doesn't leak."""
+    EXTRA_HEADERS[header_name] = canary
+    try:
+        if method.lower() == "post":
+            st, final, _ = fetch(target_url, data={})
+        else:
+            st, final, _ = fetch(target_url)
+    finally:
+        EXTRA_HEADERS.pop(header_name, None)
+    return st, final
+
+
 def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
-                      method="post", csrf_field="tokenCSRF", max_links=60):
-    """Submit ONE form with a canary, then autonomously hunt for the canary:
-      1. discover: fetch each seed + the submit's landing page, extract every
-         same-host link one hop out.
-      2. verify: fetch each candidate page (deduped); on any that contains the
-         canary id, run verdict() and record the unencoded / attr-only ones.
-    This is what turns dxadyn's stored mode into a real bot - no need to guess
-    where the payload will surface, just tell it where to start looking."""
+                      method="post", csrf_field="tokenCSRF", max_links=60,
+                      json_body=None, header_target=None):
+    """Submit ONE payload with a canary (form / json / header), then
+    autonomously hunt for the canary on same-host pages one hop from the seeds.
+    See probe_stored for the shape selection; this adds auto-discovery on top."""
     cid, canary = make_canary()
-    sub_status, landing = _submit_form(target_url, target_field, extra_fields,
-                                       canary, method=method, csrf_field=csrf_field)
+    sub_status, landing = _do_submit(target_url, target_field, extra_fields,
+                                     canary, method=method, csrf_field=csrf_field,
+                                     json_body=json_body, header_target=header_target)
 
     # seed set: user-supplied (with {CID} substitution) + submit landing + target origin's `/`
     origin = urllib.parse.urlsplit(target_url)
@@ -449,6 +492,8 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
         if len(candidates) >= max_links:
             break
 
+    label = (f"header:{header_target}" if header_target else
+             ("json" if json_body is not None else target_field))
     findings, checked = [], 0
     for url in candidates:
         st, _, body = fetch(url)
@@ -457,7 +502,7 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
             continue
         v = verdict(cid, body)
         if v in ("unencoded", "attr-only"):
-            findings.append({"target": target_url, "field": target_field,
+            findings.append({"target": target_url, "field": label,
                              "check_url": url, "reflection": v,
                              "confidence": "high" if v == "unencoded" else "medium",
                              "sub_status": sub_status, "check_status": st,
@@ -537,6 +582,17 @@ def main():
     ap.add_argument("--auto-check-max", type=int, default=60,
                     help="stored mode + --auto-check: cap candidate pages "
                          "(default 60)")
+    ap.add_argument("--json-body", default="",
+                    help="stored mode: POST raw JSON to --target instead of a "
+                         "form. Use {CANARY} in the template where the payload "
+                         "should land. Example: --json-body "
+                         "'{\"tags\":\"{CANARY}\",\"title\":\"probe\"}' "
+                         "(the SPA/REST admin path).")
+    ap.add_argument("--header-target", default="",
+                    help="stored mode: inject the canary into this HTTP header "
+                         "on the submit request instead of a form field. "
+                         "Example: --header-target True-Client-IP -- catches "
+                         "the stored header-XSS class (Bludit Finding #8 shape).")
     ap.add_argument("--csrf-field", default="tokenCSRF",
                     help="hidden CSRF field name (default tokenCSRF); empty to disable")
 
@@ -578,35 +634,49 @@ def main():
         print(f"[dxadyn] login {args.login} -> {'OK' if ok else 'FAILED (continuing anyway)'}")
 
     if args.stored:
-        if not (args.target and args.target_field):
-            print("[dxadyn] --stored requires --target and --target-field",
-                  file=sys.stderr)
+        if not args.target:
+            print("[dxadyn] --stored requires --target", file=sys.stderr)
+            sys.exit(2)
+        # exactly one submission shape must be selected
+        shape_flags = sum(bool(x) for x in
+                          (args.target_field, args.json_body, args.header_target))
+        if shape_flags != 1:
+            print("[dxadyn] --stored needs EXACTLY one of --target-field, "
+                  "--json-body, or --header-target", file=sys.stderr)
             sys.exit(2)
         if not (args.check or args.auto_check):
             print("[dxadyn] --stored needs either --check URL[,URL] or --auto-check",
                   file=sys.stderr)
             sys.exit(2)
 
+        shape_desc = (f"field='{args.target_field}'" if args.target_field else
+                      ("json body" if args.json_body else
+                       f"header='{args.header_target}'"))
+
         if args.auto_check:
             seeds = [u.strip() for u in args.auto_check_from.split(",") if u.strip()]
-            print(f"[dxadyn] STORED-AUTO probe: {args.target} field='{args.target_field}' "
+            print(f"[dxadyn] STORED-AUTO probe: {args.target} {shape_desc} "
                   f"-> autonomous crawl (seeds={len(seeds)+2}, max={args.auto_check_max}) "
                   f"- authorized/local only\n")
             findings, cid, meta = probe_stored_auto(
                 args.target, args.target_field, _parse_kv_list(args.extra),
                 seeds, method=args.method, csrf_field=args.csrf_field or "",
-                max_links=args.auto_check_max)
+                max_links=args.auto_check_max,
+                json_body=args.json_body or None,
+                header_target=args.header_target or None)
             print(f"[dxadyn] canary id = {cid}")
             print(f"[dxadyn] submit landed at: {meta['submit_landing']}")
             print(f"[dxadyn] crawled {meta['checked_pages']}/{meta['candidates']} pages")
         else:
             checks = [u.strip() for u in args.check.split(",") if u.strip()]
-            print(f"[dxadyn] STORED probe: {args.target} field='{args.target_field}' "
+            print(f"[dxadyn] STORED probe: {args.target} {shape_desc} "
                   f"-> checking {len(checks)} URL(s) - authorized/local only\n")
             findings, cid = probe_stored(args.target, args.target_field,
                                          _parse_kv_list(args.extra), checks,
                                          method=args.method,
-                                         csrf_field=args.csrf_field or "")
+                                         csrf_field=args.csrf_field or "",
+                                         json_body=args.json_body or None,
+                                         header_target=args.header_target or None)
             print(f"[dxadyn] canary id = {cid}")
 
         if not findings:

@@ -275,7 +275,51 @@ python dxadyn.py http://target/dashboard --cookie "sid=..." \
   falls back to `dxadyn`'s own crawl discovery. PHP support belongs in a future
   `dxa` extension.
 - `--probe-headers` catches **reflected** header XSS (single response). The
-  Bludit `True-Client-IP` → Last Login IP path is **stored + two-step** and
-  would need a `--stored --header-target ...` combo; that's a v3.4 item.
+  stored two-step variant is v3.4 (`--stored --header-target`).
 - Both features have unit tests (`test_dxa2dyn.py`, `test_probe_headers_*`) that
   run a local echo/reflector server and assert raw vs escaped is told apart.
+
+### v3.4 - `--json-body` and `--stored --header-target`
+
+Stored mode's `--target-field` shape covered classic HTML forms. v3.4 adds the
+two other shapes real modern targets use:
+
+**`--json-body 'JSON_TEMPLATE'` — SPA / REST admin path.** Post a JSON body
+directly to `--target` with `{CANARY}` where the payload should land. This is
+the escape hatch for admins like Grav's `admin2` that log in over a JS-driven
+JSON API instead of an HTML form. Combine with `--cookie` (from a browser
+session) to get through the SPA login itself.
+
+```bash
+python dxadyn.py --stored \
+    --cookie "session=..." \
+    --target http://target/api/v1/pages --json-body '{"tags":"{CANARY}"}' \
+    --auto-check --auto-check-from 'http://target/tag/{CID}-dxss'
+```
+
+`{CANARY}` is JSON-string-safe substituted (the canary's `"` is properly
+escaped so the template stays valid JSON).
+
+**`--header-target HEADER_NAME` — stored header-injection.** Sends one request
+to `--target` with the canary in the named HTTP header, then verdicts the
+check URL(s). This is the class where an app writes an incoming header
+(`X-Forwarded-For`, `True-Client-IP`, `Referer`, `User-Agent`) into a page
+that renders **later**, on a different route or for a different user. This
+repo's own Juice Shop Finding #8 (`True-Client-IP` → Last Login IP) is the
+canonical shape, and Bludit has the same pattern:
+
+```bash
+python dxadyn.py --stored \
+    --cookie "BLUDIT-KEY=..." \
+    --target http://localhost:8090/admin/dashboard --header-target True-Client-IP \
+    --method get --csrf-field "" \
+    --check http://localhost:8090/admin/users/admin
+```
+
+Both new shapes plug into `--auto-check` too — the crawler doesn't care how the
+canary got submitted, only where it surfaces.
+
+**Honest scope of v3.4:** the JSON body path is a literal template — no schema
+introspection, no OpenAPI. If the target expects a nested body you author it,
+same as any other API-testing tool. That is deliberate: schema-driven fuzzing
+is a different (larger) project.

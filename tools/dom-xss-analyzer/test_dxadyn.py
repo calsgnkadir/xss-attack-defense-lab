@@ -289,6 +289,109 @@ def test_probe_headers_leaves_no_lingering_headers():
     assert "X-Forwarded-For" not in dxadyn.EXTRA_HEADERS
 
 
+# --- v3.4: JSON body + stored header target ---------------------------------
+
+_V34_DB = {"json": None, "hdr": None}
+
+
+class _V34App(BaseHTTPRequestHandler):
+    """Two 'stored' surfaces:
+      POST /api/tags {"tags": "..."}  stores json -> renders RAW on /viewj
+      GET /  with X-Forwarded-Fake header  stores hdr -> renders RAW on /viewh
+    """
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype="text/html"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def do_GET(self):
+        p = urlparse(self.path)
+        if p.path == "/log":
+            xff = self.headers.get("X-Forwarded-Fake")
+            if xff:
+                _V34_DB["hdr"] = xff
+            return self._send(200, "logged")
+        if p.path == "/viewj":
+            return self._send(200, f"<h1>tag: {_V34_DB['json']}</h1>")
+        if p.path == "/viewh":
+            return self._send(200, f"<p>lastIP: {_V34_DB['hdr']}</p>")
+        if p.path == "/":
+            return self._send(200, '<a href="/viewj">j</a><a href="/viewh">h</a>')
+        return self._send(404, "?")
+
+    def do_POST(self):
+        import json as _json
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode()
+        if self.path == "/api/tags":
+            try:
+                obj = _json.loads(raw)
+                _V34_DB["json"] = obj.get("tags")
+                return self._send(200, "{\"ok\":true}", "application/json")
+            except Exception:                                # noqa: BLE001
+                return self._send(400, "bad json")
+        return self._send(404, "?")
+
+
+def test_submit_json_stores_canary_and_view_reflects_raw():
+    _V34_DB["json"] = None
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _V34App)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings, cid = dxadyn.probe_stored(
+            f"http://127.0.0.1:{port}/api/tags", target_field="",
+            extra_fields={}, check_urls=[f"http://127.0.0.1:{port}/viewj"],
+            json_body='{"tags":"{CANARY}"}', csrf_field="")
+    finally:
+        srv.shutdown()
+    assert findings, "json-body stored XSS must be detected via /viewj"
+    assert findings[0]["reflection"] == "unencoded"
+    assert findings[0]["field"] == "json"
+    assert _V34_DB["json"] == cid + '"<dXsS>'
+
+
+def test_submit_header_target_stores_canary_and_view_reflects():
+    _V34_DB["hdr"] = None
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _V34App)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings, cid = dxadyn.probe_stored(
+            f"http://127.0.0.1:{port}/log", target_field="",
+            extra_fields={}, check_urls=[f"http://127.0.0.1:{port}/viewh"],
+            method="get", header_target="X-Forwarded-Fake", csrf_field="")
+    finally:
+        srv.shutdown()
+    assert findings, "header-target stored XSS must be detected via /viewh"
+    assert findings[0]["reflection"] == "unencoded"
+    assert findings[0]["field"] == "header:X-Forwarded-Fake"
+    # header must not leak into EXTRA_HEADERS after the submit
+    assert "X-Forwarded-Fake" not in dxadyn.EXTRA_HEADERS
+
+
+def test_submit_json_escapes_quote_in_canary_correctly():
+    """The canary contains a raw `"` — the json_body template must remain
+    valid JSON after {CANARY} substitution."""
+    tmpl = '{"tags":"{CANARY}"}'
+    fake_cid = 'dxa12345678'
+    fake_canary = fake_cid + '"<dXsS>'
+    # simulate what _submit_json does internally
+    safe = tmpl.replace("{CANARY}", fake_canary
+        .replace("\\", "\\\\").replace('"', '\\"'))
+    import json as _json
+    obj = _json.loads(safe)                                  # must not raise
+    assert obj["tags"] == fake_canary
+
+
 # --- v3.2: auto-discover (crawl-after-submit) -------------------------------
 
 _AUTO_DB = {}
