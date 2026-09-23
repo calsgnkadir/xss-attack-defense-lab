@@ -289,6 +289,75 @@ def test_probe_headers_leaves_no_lingering_headers():
     assert "X-Forwarded-For" not in dxadyn.EXTRA_HEADERS
 
 
+# --- v3.5: sink-context awareness + dedup -----------------------------------
+
+def test_find_context_body_is_free_markup():
+    body = "<html><body><div>xxx dxaAAAA\"<dXsS> yyy</div></body></html>"
+    assert dxadyn.find_context("dxaAAAA", body) == "body"
+
+
+def test_find_context_title_needs_breakout():
+    body = "<html><head><title>results for dxaAAAA\"<dXsS></title>rest</head>"
+    assert dxadyn.find_context("dxaAAAA", body) == "title"
+
+
+def test_find_context_script_context():
+    body = '<html><head><script>var q = "dxaAAAA\\"<dXsS>";</script></head>'
+    assert dxadyn.find_context("dxaAAAA", body) == "script"
+
+
+def test_find_context_url_attribute():
+    body = '<html><body><a href="/search?q=dxaAAAA">l</a></body></html>'
+    assert dxadyn.find_context("dxaAAAA", body) == "url-attr:href"
+
+
+def test_find_context_generic_attribute():
+    body = '<html><body><input type="text" value="dxaAAAA"></body></html>'
+    assert dxadyn.find_context("dxaAAAA", body) == "attr:value"
+
+
+def test_context_executes_only_body_and_unknown():
+    assert dxadyn.context_executes("body")
+    assert dxadyn.context_executes("unknown")
+    assert not dxadyn.context_executes("title")
+    assert not dxadyn.context_executes("script")
+    assert not dxadyn.context_executes("attr:value")
+    assert not dxadyn.context_executes("url-attr:href")
+
+
+def test_severity_labels():
+    assert dxadyn._severity("unencoded", "body") == "executable"
+    assert dxadyn._severity("unencoded", "title") == "breakout-req"
+    assert dxadyn._severity("unencoded", "attr:value") == "breakout-req"
+    assert dxadyn._severity("attr-only", "body") == "attr-breakout"
+    assert dxadyn._severity("encoded", "body") == "-"
+
+
+def test_dedupe_collapses_same_bug_across_pages():
+    findings = [
+        {"canary_id": "dxaXX", "reflection": "unencoded", "context": "body",
+         "check_url": "http://x/a", "confidence": "high"},
+        {"canary_id": "dxaXX", "reflection": "unencoded", "context": "body",
+         "check_url": "http://x/b", "confidence": "high"},
+        {"canary_id": "dxaXX", "reflection": "unencoded", "context": "body",
+         "check_url": "http://x/c", "confidence": "high"},
+        {"canary_id": "dxaYY", "reflection": "attr-only", "context": "attr:value",
+         "check_url": "http://x/other", "confidence": "medium"},
+    ]
+    out = dxadyn.dedupe_findings(findings)
+    assert len(out) == 2                          # 2 unique bugs
+    body_bug = next(f for f in out if f["canary_id"] == "dxaXX")
+    assert body_bug["check_url"] == "http://x/a"  # first kept
+    assert body_bug["duplicates"] == ["http://x/b", "http://x/c"]
+
+
+def test_dedupe_leaves_singletons_alone():
+    findings = [{"canary_id": "dxaXX", "reflection": "unencoded",
+                 "context": "body", "check_url": "http://x/a"}]
+    out = dxadyn.dedupe_findings(findings)
+    assert out == findings                        # unchanged
+
+
 # --- HTML report ------------------------------------------------------------
 
 def test_render_html_empty_produces_valid_page():

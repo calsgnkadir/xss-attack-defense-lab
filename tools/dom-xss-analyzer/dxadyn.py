@@ -49,6 +49,7 @@ import argparse
 import datetime
 import html as htmllib
 import http.cookiejar
+import re
 import secrets
 import sys
 import urllib.parse
@@ -115,6 +116,96 @@ def apply_header(spec):
         return False
     EXTRA_HEADERS[name] = val
     return True
+
+
+# --- v3.5: sink-context awareness + finding dedup ---------------------------
+
+# Attribute names whose values are URLs (a javascript: scheme here executes).
+_URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "data",
+              "poster", "background", "srcset"}
+
+
+def find_context(cid, body):
+    """Where does the first `cid` occurrence sit in the response HTML?
+    Returns one of:
+      'body'        - free markup context; a raw <img onerror> executes
+      'title'       - inside <title>...</title>; needs </title> breakout to run
+      'script'      - inside <script>...</script>; needs JS-string breakout
+      'attr:NAME'   - inside an HTML attribute value; needs " or ' breakout
+      'url-attr:NAME' - href/src/action/... value; a `javascript:` URL executes
+      'unknown'     - cid not present (should not happen when we call this)
+    This is what turns "the payload reflected raw" into "the payload actually
+    executes without further tricks" - the practical difference between a
+    reportable exploit and a reflection that still needs a follow-on breakout
+    step (which we hit repeatedly on Bludit's <title>-only tag XSS)."""
+    i = body.find(cid)
+    if i == -1:
+        return "unknown"
+    before_low = body[max(0, i - 800): i].lower()
+
+    # inside a <title> that hasn't closed yet?
+    ti = before_low.rfind("<title")
+    if ti != -1 and "</title" not in before_low[ti:]:
+        return "title"
+    # inside a <script> that hasn't closed?
+    si = before_low.rfind("<script")
+    if si != -1 and "</script" not in before_low[si:]:
+        return "script"
+    # inside an opening tag whose > hasn't been seen yet -> attribute context
+    lt = before_low.rfind("<")
+    gt = before_low.rfind(">")
+    if lt > gt:
+        tag_seg = before_low[lt:]
+        m = re.search(r'([a-z_:][\w:-]*)\s*=\s*["\']?[^"\'<>]*$', tag_seg)
+        if m:
+            name = m.group(1)
+            if name in _URL_ATTRS:
+                return f"url-attr:{name}"
+            return f"attr:{name}"
+        return "attr"
+    return "body"
+
+
+def context_executes(context):
+    """True iff `context` renders the raw canary as executable JavaScript
+    WITHOUT any extra breakout step. The other contexts still flag a
+    reflection (the value survived unescaped) but need an additional payload
+    shape to execute - dxadyn reports both and lets the operator judge."""
+    return context in ("body", "unknown")
+
+
+def _severity(reflection, context):
+    """Combine verdict + context into a single severity label:
+      executable   - HIGH + body/unknown context: <img onerror> works as-is
+      breakout-req - HIGH + title/script/attr context: needs a follow-on payload
+      attr-breakout- verdict is 'attr-only' (a bare " survived)
+      -            - not a reportable case
+    """
+    if reflection == "unencoded":
+        return "executable" if context_executes(context) else "breakout-req"
+    if reflection == "attr-only":
+        return "attr-breakout"
+    return "-"
+
+
+def dedupe_findings(findings):
+    """Collapse findings that share the same (canary_id, reflection, context)
+    - a stored payload that surfaces on many admin/preview pages is the same
+    bug repeated (WonderCMS live-fire example: 58 near-identical rows). Keep
+    the first occurrence, tuck the rest of the URLs into a `duplicates` list
+    on it, and drop them from the primary list."""
+    seen, out = {}, []
+    for f in findings:
+        cid = f.get("canary_id") or f.get("canary") or id(f)
+        key = (cid, f.get("reflection"), f.get("context"))
+        if key in seen:
+            primary = seen[key]
+            primary.setdefault("duplicates", []).append(
+                f.get("check_url") or f.get("url"))
+        else:
+            seen[key] = f
+            out.append(f)
+    return out
 
 
 def verdict(cid, body):
@@ -207,7 +298,9 @@ def probe_form(form):
             status, _, body = fetch(url)
         v = verdict(cid, body)
         if v in ("unencoded", "attr-only"):
-            out.append(_finding(form["action"], form["method"], target, v, status))
+            ctx = find_context(cid, body or "")
+            out.append(_finding(form["action"], form["method"], target, v, status,
+                                context=ctx, canary_id=cid))
     return out
 
 
@@ -222,15 +315,19 @@ def probe_link(link):
         status, _, body = fetch(url)
         v = verdict(cid, body)
         if v in ("unencoded", "attr-only"):
+            ctx = find_context(cid, body or "")
             out.append(_finding(f"{parts.scheme}://{parts.netloc}{parts.path}",
-                                "GET", name, v, status))
+                                "GET", name, v, status,
+                                context=ctx, canary_id=cid))
     return out
 
 
-def _finding(where, method, param, v, status):
+def _finding(where, method, param, v, status, context="unknown", canary_id=None):
     conf = "high" if v == "unencoded" else "medium"
     return {"url": where, "method": method.upper(), "param": param,
-            "reflection": v, "confidence": conf, "status": status}
+            "reflection": v, "confidence": conf, "status": status,
+            "context": context, "severity": _severity(v, context),
+            "canary_id": canary_id}
 
 
 def crawl(base_url, depth):
@@ -345,9 +442,11 @@ def probe_stored(target_url, target_field, extra_fields, check_urls,
         st, _, body = fetch(url)
         v = verdict(cid, body or "")
         if v in ("unencoded", "attr-only"):
+            ctx = find_context(cid, body or "")
             out.append({"target": target_url, "field": label, "check_url": url,
                         "reflection": v, "confidence": "high" if v == "unencoded" else "medium",
-                        "sub_status": sub_status, "check_status": st, "canary_id": cid})
+                        "sub_status": sub_status, "check_status": st, "canary_id": cid,
+                        "context": ctx, "severity": _severity(v, ctx)})
     return out, cid
 
 
@@ -503,12 +602,16 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
             continue
         v = verdict(cid, body)
         if v in ("unencoded", "attr-only"):
+            ctx = find_context(cid, body or "")
             findings.append({"target": target_url, "field": label,
                              "check_url": url, "reflection": v,
                              "confidence": "high" if v == "unencoded" else "medium",
                              "sub_status": sub_status, "check_status": st,
-                             "canary_id": cid, "auto_discovered": True})
+                             "canary_id": cid, "auto_discovered": True,
+                             "context": ctx, "severity": _severity(v, ctx)})
 
+    # dedupe: same canary + reflection + context on many pages = one bug
+    findings = dedupe_findings(findings)
     return findings, cid, {"submit_landing": landing, "checked_pages": checked,
                            "candidates": len(candidates)}
 
@@ -529,11 +632,13 @@ def probe_headers(url, header_names):
             EXTRA_HEADERS.pop(name, None)
         v = verdict(cid, body or "")
         if v in ("unencoded", "attr-only"):
+            ctx = find_context(cid, body or "")
             findings.append({
                 "url": url, "method": "GET", "param": f"header:{name}",
                 "reflection": v,
                 "confidence": "high" if v == "unencoded" else "medium",
-                "status": status,
+                "status": status, "context": ctx,
+                "severity": _severity(v, ctx), "canary_id": cid,
             })
     return findings
 
@@ -547,9 +652,12 @@ def render_html(findings, target, mode, meta=None):
         return htmllib.escape(str(s))
 
     color = {"high": "#f85149", "medium": "#d29922", "low": "#8b949e",
-             "unencoded": "#f85149", "attr-only": "#d29922"}
+             "unencoded": "#f85149", "attr-only": "#d29922",
+             "executable": "#f85149", "breakout-req": "#d29922",
+             "attr-breakout": "#d29922"}
     total = len(findings)
-    highs = sum(1 for f in findings if f.get("confidence") == "high")
+    execs = sum(1 for f in findings if f.get("severity") == "executable")
+    breakout = sum(1 for f in findings if f.get("severity") == "breakout-req")
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     rows = []
@@ -560,7 +668,8 @@ def render_html(findings, target, mode, meta=None):
         url = f.get("check_url") or f.get("url") or "-"
         method = f.get("method") or ("stored" if "field" in f else "GET")
         refl = f.get("reflection", "-")
-        conf = f.get("confidence", "-")
+        ctx = f.get("context", "-")
+        sev = f.get("severity", "-")
         origin = f.get("origin") or (
             "stored-auto" if f.get("auto_discovered") else
             "stored" if "check_url" in f else "reflected")
@@ -568,16 +677,19 @@ def render_html(findings, target, mode, meta=None):
         chk_st = f.get("check_status") or f.get("status")
         status = f"submit HTTP {sub_st}, check HTTP {chk_st}" if sub_st is not None \
             else f"HTTP {chk_st}"
+        dups = f.get("duplicates") or []
+        dup_note = f" <span class='muted small'>(+{len(dups)} more same-bug URLs)</span>" if dups else ""
         rows.append(
             "<tr>"
-            f"<td><span class='badge' style='background:{color.get(conf,'#8b949e')}'>"
-            f"{esc(conf.upper())}</span></td>"
+            f"<td><span class='badge' style='background:{color.get(sev,'#8b949e')}'>"
+            f"{esc(sev.upper())}</span></td>"
+            f"<td class='mono small'>{esc(ctx)}</td>"
             f"<td><span class='badge' style='background:{color.get(refl,'#8b949e')}'>"
             f"{esc(refl)}</span></td>"
             f"<td class='mono'>{esc(origin)}</td>"
             f"<td class='mono'>{esc(method)}</td>"
             f"<td class='mono'>{esc(param)}</td>"
-            f"<td class='mono muted url'>{esc(url)}</td>"
+            f"<td class='mono muted url'>{esc(url)}{dup_note}</td>"
             f"<td class='muted small'>{esc(status)}</td>"
             "</tr>"
         )
@@ -613,13 +725,14 @@ def render_html(findings, target, mode, meta=None):
 <div class="sub">target: <span class="mono">{esc(target)}</span> &middot; mode: <span class="mono">{esc(mode)}</span> &middot; generated: {esc(ts)}</div>
 {meta_html}
 <div class="stats">
- <div class="stat"><div class="n">{total}</div><div class="l">candidates</div></div>
- <div class="stat"><div class="n" style="color:{color['high']}">{highs}</div><div class="l">high confidence</div></div>
+ <div class="stat"><div class="n">{total}</div><div class="l">unique candidates</div></div>
+ <div class="stat"><div class="n" style="color:{color['executable']}">{execs}</div><div class="l">executable</div></div>
+ <div class="stat"><div class="n" style="color:{color['breakout-req']}">{breakout}</div><div class="l">needs breakout</div></div>
 </div>
-{"<div class='warn'>Reflection is not proof of execution &mdash; confirm each HIGH in the browser (the surrounding HTML context decides whether the payload actually runs).</div>" if findings else ""}
+{"<div class='warn'>EXECUTABLE = a raw &lt;img onerror&gt; payload runs as-is (body/free context). NEEDS-BREAKOUT = the value survives raw but is inside &lt;title&gt; / &lt;script&gt; / an attribute value, so a follow-on payload (e.g. &lt;/title&gt; or a &quot; breakout) is required for real execution.</div>" if findings else ""}
 <table>
- <tr><th>conf</th><th>reflection</th><th>origin</th><th>method</th><th>param</th><th>url</th><th>status</th></tr>
- {"".join(rows) if rows else "<tr><td colspan=7 class='muted'>No unencoded reflections found. (Inputs may be encoded, POST-guarded, or absent.)</td></tr>"}
+ <tr><th>severity</th><th>context</th><th>reflection</th><th>origin</th><th>method</th><th>param</th><th>url</th><th>status</th></tr>
+ {"".join(rows) if rows else "<tr><td colspan=8 class='muted'>No unencoded reflections found. (Inputs may be encoded, POST-guarded, or absent.)</td></tr>"}
 </table>
 <footer>dxadyn - deterministic dynamic XSS verifier. Companion of <span class='mono'>dxa</span>. Authorized targets only.</footer>
 """
@@ -787,12 +900,19 @@ def main():
             tag = "UNENCODED (HTML injection)" if f["reflection"] == "unencoded" \
                 else "attribute-breakout quote"
             mode = " [auto]" if f.get("auto_discovered") else ""
-            print(f"{f['check_url']}  [{f['confidence'].upper()}]{mode}  "
+            ctx = f.get("context", "?")
+            sev = f.get("severity", "-")
+            dup = len(f.get("duplicates", []))
+            dup_s = f"  (+{dup} more URLs, same bug)" if dup else ""
+            print(f"{f['check_url']}  [{sev.upper()}] context={ctx}{mode}  "
                   f"stored via {f['target']} field '{f['field']}'  -> {tag}  "
-                  f"(submit HTTP {f['sub_status']}, check HTTP {f['check_status']})")
-        highs = sum(1 for f in findings if f["confidence"] == "high")
-        print(f"\n{len(findings)} stored candidate(s) - {highs} unencoded. "
-              f"Confirm each in the browser (does the payload actually execute?).")
+                  f"(submit HTTP {f['sub_status']}, check HTTP {f['check_status']}){dup_s}")
+        execs = sum(1 for f in findings if f.get("severity") == "executable")
+        breakout = sum(1 for f in findings if f.get("severity") == "breakout-req")
+        print(f"\n{len(findings)} unique stored candidate(s) - "
+              f"{execs} EXECUTABLE (body/free context; runs as-is), "
+              f"{breakout} need a follow-on breakout (title/attr/script context). "
+              f"Confirm each in the browser.")
         sys.exit(1)
 
     # --- reflected (v1) path ---
@@ -820,11 +940,16 @@ def main():
     for f in findings:
         tag = "UNENCODED (HTML injection)" if f["reflection"] == "unencoded" \
             else "attribute-breakout quote"
-        print(f"{f['url']}  [{f['confidence'].upper()}]  {f['method']} param '{f['param']}'"
-              f"  -> {tag}  (HTTP {f['status']})")
-    highs = sum(1 for f in findings if f["confidence"] == "high")
-    print(f"\n{len(findings)} reflected candidate(s) - {highs} unencoded. "
-          f"Confirm each in the browser (does the payload actually execute?).")
+        ctx = f.get("context", "?")
+        sev = f.get("severity", "-")
+        print(f"{f['url']}  [{sev.upper()}] context={ctx}  "
+              f"{f['method']} param '{f['param']}'  -> {tag}  (HTTP {f['status']})")
+    execs = sum(1 for f in findings if f.get("severity") == "executable")
+    breakout = sum(1 for f in findings if f.get("severity") == "breakout-req")
+    print(f"\n{len(findings)} reflected candidate(s) - "
+          f"{execs} EXECUTABLE (body/free context), "
+          f"{breakout} need a follow-on breakout. "
+          f"Confirm each in the browser.")
     sys.exit(1)
 
 
