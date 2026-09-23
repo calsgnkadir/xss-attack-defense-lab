@@ -289,6 +289,78 @@ def test_probe_headers_leaves_no_lingering_headers():
     assert "X-Forwarded-For" not in dxadyn.EXTRA_HEADERS
 
 
+# --- v3.6: PUT/PATCH/DELETE method support ----------------------------------
+
+class _MethodEcho(BaseHTTPRequestHandler):
+    """Records the request method + JSON body for the last request; responds
+    with a page that reflects whatever was sent so verdict can grade."""
+    last = {"method": None, "body": None, "path": None}
+    def log_message(self, *a):
+        pass
+    def _handle(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode() if length else ""
+        self.__class__.last = {"method": self.command, "body": raw,
+                               "path": self.path}
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        # echo raw body inside <body> so verdict + context detection can run
+        self.wfile.write(f"<body>echoed: {raw}</body>".encode())
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = _handle
+
+
+def test_fetch_supports_put_and_delete_methods():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _MethodEcho)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        dxadyn.fetch(f"http://127.0.0.1:{port}/x", data=b"raw", method="PUT")
+        assert _MethodEcho.last["method"] == "PUT"
+        assert _MethodEcho.last["body"] == "raw"
+        dxadyn.fetch(f"http://127.0.0.1:{port}/x", data=b"", method="DELETE")
+        assert _MethodEcho.last["method"] == "DELETE"
+    finally:
+        srv.shutdown()
+
+
+def test_submit_json_uses_put_when_asked():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _MethodEcho)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # Call _submit_json directly so we can inspect the method it dispatched
+        # (going through probe_stored would follow up with a GET check that
+        # would overwrite _MethodEcho.last).
+        st, _ = dxadyn._submit_json(
+            f"http://127.0.0.1:{port}/api/thing",
+            '{"name":"{CANARY}"}', "dxaTEST", method="PUT")
+    finally:
+        srv.shutdown()
+    assert _MethodEcho.last["method"] == "PUT"
+    assert '"name":"dxaTEST"' in _MethodEcho.last["body"]
+
+
+def test_submit_form_dispatches_patch():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _MethodEcho)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        st, _ = dxadyn._submit_form(
+            f"http://127.0.0.1:{port}/api/thing", "name",
+            {}, "dxaTEST", method="PATCH", csrf_field="")
+    finally:
+        srv.shutdown()
+    assert _MethodEcho.last["method"] == "PATCH"
+    assert "name=dxaTEST" in _MethodEcho.last["body"]
+
+
 # --- v3.5: sink-context awareness + dedup -----------------------------------
 
 def test_find_context_body_is_free_markup():

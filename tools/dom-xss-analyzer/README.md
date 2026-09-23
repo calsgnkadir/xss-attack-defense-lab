@@ -344,3 +344,32 @@ canary got submitted, only where it surfaces.
 introspection, no OpenAPI. If the target expects a nested body you author it,
 same as any other API-testing tool. That is deliberate: schema-driven fuzzing
 is a different (larger) project.
+
+### v3.6 - PUT / PATCH / DELETE method support
+
+Real REST APIs use `PUT` to update, `PATCH` to modify, `DELETE` to remove.
+v3.4's `--method get|post` was too narrow for them. v3.6 opens it up:
+
+```bash
+python dxadyn.py --stored --method put \
+    --header "Authorization: Bearer eyJ..." \
+    --target http://api/v1/users/me \
+    --json-body '{"name":"{CANARY}"}' \
+    --check http://api/v1/users/me
+```
+
+The method routes through `_submit_form`, `_submit_json`, and `_submit_header`
+uniformly; the underlying `fetch()` sets Python's `Request(method=...)` when a
+non-default HTTP verb is asked for.
+
+**Honest gap surfaced by this feature: JSON response context.** Once dxadyn can
+reach a REST endpoint, it starts seeing responses like
+`{"fullName":"dxa..\"<dXsS>"}` and — because the canary markup survives raw in
+the body bytes — currently flags them as `[EXECUTABLE] context=body`. That is a
+false positive: `Content-Type: application/json` (especially with
+`X-Content-Type-Options: nosniff`) means the browser parses this as JSON, not
+HTML, so no XSS actually fires — and any React/Vue/Angular front-end will then
+`{value}`-escape the string when it renders. The **real** XSS in that world
+lives one layer up in the client. A `v3.7` gate that inspects `Content-Type`
+before scoring reflection would kill this class of FP; it's a documented,
+prioritised follow-up.

@@ -79,15 +79,24 @@ OPENER = _opener()
 EXTRA_HEADERS = {}          # populated by --header / --cookie CLI flags (v3.1)
 
 
-def fetch(url, data=None):
-    """GET (data=None) or POST (data=dict). Returns (status, final_url, body).
-    Any headers registered in EXTRA_HEADERS are attached to every request - this
-    is the hook the --cookie / --header flags use to reuse a browser session
-    against SPA/JSON targets where dxadyn's HTML-form login cannot apply."""
-    body_bytes = urllib.parse.urlencode(data).encode() if data is not None else None
+def fetch(url, data=None, method=None):
+    """GET (data=None, method=None) or POST (data=dict, method=None), or any
+    HTTP method (method='PUT'|'PATCH'|'DELETE'|...). When `method` is set it
+    overrides the default. `data` may be `dict` (form-urlencoded), `bytes`
+    (raw body, used by `_fetch_json`), or None (no body).
+    Returns (status, final_url, body). EXTRA_HEADERS ride every request."""
+    if isinstance(data, (bytes, bytearray)):
+        body_bytes = bytes(data)
+    elif data is None:
+        body_bytes = None
+    else:
+        body_bytes = urllib.parse.urlencode(data).encode()
     headers = {"User-Agent": UA}
     headers.update(EXTRA_HEADERS)                            # user-supplied wins
-    req = urllib.request.Request(url, data=body_bytes, headers=headers)
+    kwargs = {"data": body_bytes, "headers": headers}
+    if method:
+        kwargs["method"] = method.upper()
+    req = urllib.request.Request(url, **kwargs)
     try:
         with OPENER.open(req, timeout=15) as resp:
             return resp.status, resp.geturl(), resp.read().decode("utf-8", "ignore")
@@ -409,10 +418,10 @@ def login(login_url, user, password, user_field="username", pass_field="password
 def _do_submit(target_url, target_field, extra_fields, canary,
                method="post", csrf_field="tokenCSRF",
                json_body=None, header_target=None):
-    """Dispatch to the right submit style for stored mode. Exactly one of the
-    three shapes is used (form / json / header)."""
+    """Dispatch to the right submit style. `method` propagates to all three
+    (form/json/header) so REST endpoints that want PUT/PATCH/DELETE work."""
     if json_body is not None:
-        return _submit_json(target_url, json_body, canary)
+        return _submit_json(target_url, json_body, canary, method=method)
     if header_target:
         return _submit_header(target_url, header_target, canary, method=method)
     return _submit_form(target_url, target_field, extra_fields, canary,
@@ -490,7 +499,8 @@ def _all_links(base_url, body):
 def _submit_form(target_url, target_field, extra_fields, canary,
                  method="post", csrf_field="tokenCSRF"):
     """Fetch the target once (to grab CSRF), then submit with the canary in
-    `target_field`. Returns (submit_status, landing_url)."""
+    `target_field`. `method` accepts get/post; PUT/PATCH/DELETE send the form
+    as urlencoded body with the explicit method. Returns (status, final_url)."""
     tok = None
     if csrf_field:
         st, _, body = fetch(target_url)
@@ -500,50 +510,56 @@ def _submit_form(target_url, target_field, extra_fields, canary,
     data[target_field] = canary
     if tok is not None and csrf_field:
         data[csrf_field] = tok
-    if method.lower() == "post":
-        st, final, _ = fetch(target_url, data=data)
-    else:
+    m = method.upper()
+    if m == "GET":
         sep = "&" if "?" in target_url else "?"
         st, final, _ = fetch(target_url + sep + urllib.parse.urlencode(data))
+    elif m == "POST":
+        st, final, _ = fetch(target_url, data=data)
+    else:
+        st, final, _ = fetch(target_url, data=data, method=m)
     return st, final
 
 
-def _fetch_json(url, body_bytes):
-    """POST a JSON body. Same shape as fetch() but sets Content-Type + raw body."""
-    headers = {"User-Agent": UA, "Content-Type": "application/json"}
-    headers.update(EXTRA_HEADERS)
-    req = urllib.request.Request(url, data=body_bytes, headers=headers)
+def _fetch_json(url, body_bytes, method="POST"):
+    """Send a JSON body with Content-Type: application/json. Any HTTP method
+    is accepted (POST default; PUT/PATCH/DELETE for REST endpoints)."""
+    saved = EXTRA_HEADERS.get("Content-Type")
+    EXTRA_HEADERS["Content-Type"] = "application/json"
     try:
-        with OPENER.open(req, timeout=15) as resp:
-            return resp.status, resp.geturl(), resp.read().decode("utf-8", "ignore")
-    except urllib.error.HTTPError as e:
-        return e.code, url, e.read().decode("utf-8", "ignore")
-    except Exception as e:                                    # noqa: BLE001
-        return None, url, f"__error__: {e}"
+        result = fetch(url, data=bytes(body_bytes), method=method)
+    finally:
+        if saved is None:
+            EXTRA_HEADERS.pop("Content-Type", None)
+        else:
+            EXTRA_HEADERS["Content-Type"] = saved
+    return result
 
 
-def _submit_json(target_url, json_template, canary):
-    """POST the given JSON template to target_url after substituting {CANARY}
-    (and its JSON-string-safe variant) with the actual canary value. Returns
-    (submit_status, landing_url). This is v3.4's escape hatch for SPA / REST
-    admins (Grav-style)."""
-    # {CANARY} inside a JSON string must be JSON-escaped (backslash + quote)
+def _submit_json(target_url, json_template, canary, method="POST"):
+    """Send `json_template` (with `{CANARY}` substituted) to target_url as
+    application/json. Method defaults to POST; REST APIs often need PUT/PATCH,
+    which callers pass through. Returns (submit_status, landing_url)."""
     safe = json_template.replace("{CANARY}", canary
         .replace("\\", "\\\\").replace('"', '\\"'))
-    st, final, _ = _fetch_json(target_url, safe.encode("utf-8"))
+    st, final, _ = _fetch_json(target_url, safe.encode("utf-8"), method=method)
     return st, final
 
 
-def _submit_header(target_url, header_name, canary, method="get"):
-    """Send target_url once with `canary` in `header_name`. Returns
-    (submit_status, landing_url). The header is registered on EXTRA_HEADERS
-    for the duration of the request, then popped so it doesn't leak."""
+def _submit_header(target_url, header_name, canary, method="GET"):
+    """Send target_url once with `canary` in `header_name`. Any HTTP method
+    is supported; the header is registered on EXTRA_HEADERS for the request
+    and popped afterwards so it doesn't leak."""
     EXTRA_HEADERS[header_name] = canary
+    m = method.upper()
     try:
-        if method.lower() == "post":
+        if m == "GET":
+            st, final, _ = fetch(target_url)
+        elif m == "POST":
             st, final, _ = fetch(target_url, data={})
         else:
-            st, final, _ = fetch(target_url)
+            # PUT/PATCH/DELETE with empty body
+            st, final, _ = fetch(target_url, data=b"", method=m)
     finally:
         EXTRA_HEADERS.pop(header_name, None)
     return st, final
@@ -767,8 +783,10 @@ def main():
     ap.add_argument("--target-field", help="stored mode: form field to inject the canary into")
     ap.add_argument("--extra", default="",
                     help="stored mode: extra form fields, `a=1,b=hi,c=` comma-separated")
-    ap.add_argument("--method", default="post", choices=["post", "get"],
-                    help="stored mode: submission method (default post)")
+    ap.add_argument("--method", default="post",
+                    choices=["post", "get", "put", "patch", "delete"],
+                    help="stored mode: HTTP method for the submission "
+                         "(default post; use PUT/PATCH/DELETE for REST endpoints)")
     ap.add_argument("--check", default="",
                     help="stored mode: comma-separated URL(s) to check; `{CID}` is replaced with the canary id")
     ap.add_argument("--auto-check", action="store_true",
