@@ -1,18 +1,20 @@
 # Web Application Security — Findings, Tooling & Independent Research
 
-Hands-on web application security work built on three concrete outputs: **confirmed vulnerabilities**
-on OWASP Juice Shop, a **working DOM-XSS static analyzer** I wrote (with tests + CI), and
-**independent research on real third-party open-source software** that produced externally-validated
-results. The classes covered span the **OWASP Top 10** — **XSS** (reflected, stored, DOM, mutation),
-**SQL Injection**, **JWT / broken authentication**, **access control (IDOR/BOLA)**, and **CSP
-bypass** — each attack paired with its defense.
+Hands-on web application security work built on four concrete outputs: **confirmed vulnerabilities**
+on OWASP Juice Shop, a **working XSS analysis bot** I wrote (`dxa` + `dxadyn` + `dxa2dyn`, 5-language
+static + 10-flag dynamic + bridge, 79 tests, CI), **independent research on real third-party
+open-source software** that produced externally-validated results (a Broken-Access-Control vulnerability
+confirmed by Patchstack + a SQL-injection variant re-derived via patch-diffing that was published as a
+CVE), and **eight mechanism-first writeups** explaining the reasoning behind each class. The scope
+spans the **OWASP Top 10** — XSS (reflected/stored/DOM/mutation), SQL Injection, JWT / broken
+authentication, access control (IDOR/BOLA), CSP bypass — each attack paired with its defense.
 
-> XSS is where this work goes deepest (its origin and the `dom-xss-analyzer` tool), but the same
+> XSS is where this work goes deepest (its origin and the tool suite), but the same
 > **source → sink** discipline is applied across injection, authentication, and access-control bugs.
 
 The goal was not to collect scoreboard points, but to **understand the mechanisms** behind each
 vulnerability class using a repeatable *source → sink* methodology — and to be able to explain every
-step, not just paste a payload.
+step, not just paste a payload. The tool suite makes that methodology *runnable*.
 
 > ⚠️ **Scope & ethics.** Everything here was carried out **only** on authorized targets: OWASP Juice
 > Shop running locally via Docker on `localhost:3000`, publicly-distributed open-source code verified
@@ -33,20 +35,29 @@ step, not just paste a payload.
 - **Independent, real-world research** applying the same method to third-party open-source software,
   with externally-validated results and coordinated disclosure (see
   [`research/`](research/) — *Beyond the Lab*).
-- **Tooling** — the source → sink methodology encoded as a small static analyzer that flags DOM-XSS
-  sources, sinks, and likely flows in JavaScript (see [`tools/dom-xss-analyzer/`](tools/dom-xss-analyzer/)).
-- **Writeups** — mechanism-first technical explainers for each vulnerability class (see
-  [`writeups/`](writeups/)).
+- **Tool suite** — the source → sink methodology encoded as a runnable XSS bot
+  ([`tools/dom-xss-analyzer/`](tools/dom-xss-analyzer/)): the static analyzer `dxa` (5 languages —
+  JS/TS + C#/.NET + PHP + Java + Python — with a 5-layer precision chain: sink patterns, source/taint,
+  same-line escape squelch, cross-method sanitizer awareness, multi-line statement join, and sink-family
+  dedup), the dynamic verifier `dxadyn` (10 CLI flags — reflected/stored/auto-check/JSON body/header
+  target/cookie or bearer session import/PUT-PATCH-DELETE/probe-headers/HTML report/Content-Type gate),
+  and the bridge `dxa2dyn` that feeds static HIGH hints into the dynamic probe. 79 pytest cases,
+  CI-gated, zero third-party dependencies.
+- **Writeups** — eight mechanism-first technical explainers (01-08), each tied to a confirmed finding
+  or a documented tool milestone; see [`writeups/`](writeups/).
 
 ---
 
-## Tools
+## Tools used (hand & bot)
 
 | Tool | Use |
 |------|-----|
+| **`dxa`** (own — Python, 0 deps) | Statik: JS/TS + C#/.NET + PHP + Java + Python; source→sink + taint; 5-katman precision chain |
+| **`dxadyn`** (own — Python, 0 deps) | Dinamik: reflected + stored + auto-check + JSON body + header target + cookie/bearer + PUT/PATCH/DELETE; HTML report |
+| **`dxa2dyn`** (own — Python, 0 deps) | Bridge: static HIGH hints → dynamic probe with those parameter names |
 | **Burp Suite** (Community) | Proxy to capture requests; **Repeater** to modify and resend raw HTTP; header injection; API testing without the frontend |
 | **Chrome DevTools (F12)** | **Elements** (verify raw HTML vs escaped in the DOM), **Console** (proof of execution), **Network** (request/response inspection) |
-| **OWASP Juice Shop** (Docker) | Primary authorized target |
+| **OWASP Juice Shop** (Docker) | Primary authorized lab target |
 | **PortSwigger Web Security Academy** | Additional structured labs (SQL injection, CSP bypass) used to cross-check technique |
 
 ---
@@ -134,6 +145,29 @@ unpatched details are published. Full methodology and honest results: [`research
 
 ---
 
+## The bot pointed at real projects
+
+The tool suite (`dxa` + `dxadyn` + `dxa2dyn`) was live-fired against my own projects — the honest
+test of whether a hand-written triage aid is worth pointing at production-shaped code. Every scan on
+this list is on code I own and run locally.
+
+| Project | Stack | Static HIGH | Dynamic HIGH | Honest reading |
+|---------|-------|-------------|--------------|----------------|
+| **[hotel-platform-main](https://github.com/calsgnkadir/hotel-platform-main)** | React 18 SPA + Spring Boot 3 + MySQL + JWT | 0 (frontend) · **1** (backend Java) | 0 (JSON-only responses; `json-only` severity kicks in) | The 1 Java HIGH is `IdempotencyFilter` writing a *previous 2xx JSON body* on cache hit — real reach worth reviewing but not exploitable (CT gate). Down from 3 HIGH before the v3.8 sanitizer gate + v3.9 dedup |
+| **[wallet-api](https://github.com/calsgnkadir/wallet-api)** | ASP.NET Core 8 REST | **0** | — | Pure JSON API, no HTML rendering surface, no `@Html.Raw` / views — `dxa` correctly stays quiet |
+| **[health-blockchain](https://github.com/calsgnkadir/health-blockchain)** | FastAPI (Python) backend + vanilla JS frontend | **0** Python (`JSONResponse` everywhere) · 78 MEDIUM (JS) | not yet dynamic-scanned | Backend is JSON-only (correct 0 HIGH). Frontend's static/js + js/modules use `innerHTML` in 74 spots at MEDIUM — worth eyes-on manual review, no proven source |
+
+**What this list demonstrates:** the bot's precision discipline. On well-designed API-first
+backends, HIGH count is *zero*, not because the tool is blind but because there's no HTML
+rendering surface for XSS to fire in. That is the number a real security tool should report on
+secure code — and the hotel-platform 3→2→1 progression (via the v3.8 cross-method sanitizer
+awareness and v3.9 sink-family dedup) is the receipt that the precision chain is doing work.
+
+The full HTML reports live in `hotel-report/`, `wallet-report/`, and `health-report/` next to this
+repo on disk; the tool suite is what produced them, and re-running is a one-liner per target.
+
+---
+
 ## Key insights
 
 - **The render decides, not the response.** Seeing raw HTML in an HTTP response does *not* mean XSS
@@ -171,9 +205,18 @@ unpatched details are published. Full methodology and honest results: [`research
 xss-attack-defense-lab/
 ├── README.md          – this file
 ├── methodology.md     – the full source → sink hunting method
-├── tools/             – dom-xss-analyzer: the source → sink method as a static linter (Python) + CI
+├── tools/
+│   └── dom-xss-analyzer/
+│       ├── dxa.py               – static analyzer (5 lang, taint, 5-layer precision chain)
+│       ├── dxadyn.py            – dynamic verifier (reflected/stored/auto/JSON/header/PUT/PATCH…)
+│       ├── dxa2dyn.py           – static→dynamic bridge (dxa HIGH hints → dxadyn probe list)
+│       ├── examples/            – vulnerable + safe corpus per language (JS/CS/PHP/Java/Python)
+│       ├── test_dxa.py + test_dxadyn.py + test_dxa2dyn.py   – 79 pytest cases (CI)
+│       └── README.md            – tool docs + capability matrix
 ├── research/          – Beyond the Lab: independent real-world research + externally-validated results
-├── writeups/          – mechanism-first technical explainers, each tied to a confirmed finding
+├── writeups/          – 8 mechanism-first explainers (01: filtering, 02: DOM XSS in a React SPA,
+│                        03: SQLi, 04: JWT, 05: IDOR/BOLA, 06: building the bot, 07: teaching the
+│                        bot to log in and shut up, 08: what the bot doesn't shout about matters)
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
 └── defense/           – written secure-coding defenses for every confirmed class
 ```
@@ -183,6 +226,9 @@ the [Findings](#findings) table above and expanded in the [`writeups/`](writeups
 
 📸 **Evidence:** selected captures in [`screenshots/`](screenshots/) (solved challenges, Burp Repeater,
 HTTP history, profile/CSP fields).
+
+🤖 **Bot:** `tools/dom-xss-analyzer/README.md` documents every CLI flag and the precision chain.
+Ran on all three of my own projects (see the *bot pointed at real projects* section above).
 
 ---
 
