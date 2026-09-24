@@ -8,6 +8,10 @@ likely **source → sink flows** between them — across a full-stack surface:
 - **client side** — JavaScript / TypeScript (DOM XSS)
 - **server side** — C# / ASP.NET & Razor (server-rendered XSS)
 - **server side** — PHP (`echo` / `print` / `<?= ?>` / Blade `{!! !!}` / Twig `|raw`)
+- **server side** — Java / Servlet / Spring / JSP / Thymeleaf
+  (`response.getWriter().write` / `<%= %>` / `<c:out escapeXml="false">` /
+  `th:utext` / `[(${...})]`; sources: `request.getParameter`,
+  `@RequestParam`/`@RequestHeader`/`@PathVariable`/`@CookieValue`/`@RequestBody`)
 
 It is the `source → sink` methodology from this repository
 ([`../../methodology.md`](../../methodology.md)) expressed as runnable code.

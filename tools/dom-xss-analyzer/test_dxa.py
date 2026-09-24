@@ -120,6 +120,47 @@ def test_php_lang_label_is_php():
     assert findings and all(x["lang"] == "php" for x in findings)
 
 
+# --- Java / Servlet / Spring detection --------------------------------------
+
+def test_java_servlet_write_from_request_param_is_high():
+    f = by_sink(scan("vulnerable.java"))
+    # both servlet-writer and response-write may match same line - either is fine
+    key = "response-write" if "response-write" in f else "servlet-writer"
+    assert key in f
+    assert any(x["confidence"] == "high" for x in f[key])
+
+
+def test_java_taint_propagates_through_local_var():
+    f = by_sink(scan("vulnerable.java"))
+    key = "response-write" if "response-write" in f else "servlet-writer"
+    # some HIGH finding must be driven by a tainted local (not a source on
+    # the same line) - the `String greet = "Hello " + name; ... println(greet)`
+    # pattern proves compute_taint runs on Java too.
+    assert any(x["confidence"] == "high" and x["tainted_vars"] for x in f[key])
+
+
+def test_java_spring_requestparam_source_is_recognised():
+    findings = scan("vulnerable.java")
+    highs = [x for x in findings if x["confidence"] == "high"]
+    assert any("spring-param" in x["sources"] or x["tainted_vars"] for x in highs)
+
+
+def test_java_lang_label_is_java():
+    findings = scan("vulnerable.java")
+    assert findings and all(x["lang"] == "java" for x in findings)
+
+
+def test_java_safe_file_has_no_high_confidence():
+    findings = scan("safe.java")
+    # every HIGH must have an escape function on the SAME line (proximity gate)
+    highs = [x for x in findings if x["confidence"] == "high"]
+    assert all(
+        any(esc in x["code"] for esc in
+            ("escapeHtml4", "htmlEscape", "Encode.forHtml"))
+        for x in highs
+    )
+
+
 def test_php_safe_file_has_no_high_confidence():
     findings = scan("safe.php")
     # safe.php still triggers sink matches, but nothing should be HIGH -

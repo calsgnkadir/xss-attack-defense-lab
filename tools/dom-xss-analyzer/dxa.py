@@ -134,8 +134,46 @@ PHP_SOURCES = [
     ("Symfony-Request", re.compile(r'\$request\s*->\s*(?:query|request|cookies|headers|files|attributes)\b')),
 ]
 
+# --- Java / JSP / Thymeleaf sinks (server-side XSS: unescaped output) -------
+JAVA_SINKS = [
+    ("servlet-writer",  re.compile(r'\b(?:getWriter\(\)|PrintWriter\s*\.\s*\w+)\s*\.\s*(?:print(?:ln)?|write|append)\s*\('),
+     "high",   "Servlet PrintWriter print/println/write emits raw response body"),
+    ("servlet-output",  re.compile(r'\bServletOutputStream\b.*\.(?:print|write)\s*\('),
+     "high",   "ServletOutputStream writes raw bytes to the response"),
+    ("response-write",  re.compile(r'\bresponse\s*\.\s*getWriter\(\)\s*\.\s*(?:print(?:ln)?|write|append)\s*\('),
+     "high",   "response.getWriter() writes raw output"),
+    ("jsp-expr",        re.compile(r'<%=[^%]*(?:request|param|session|cookie|\bvar\b|\$)'),
+     "high",   "JSP <%= %> scriptlet emits value unescaped (unless htmlEscape wraps it)"),
+    ("jsp-el-unescape", re.compile(r'<c:out[^>]+escapeXml\s*=\s*"false"'),
+     "high",   "<c:out escapeXml=\"false\"> disables the default JSP escaping"),
+    ("th-utext",        re.compile(r'\bth:utext\b'),
+     "high",   "Thymeleaf th:utext renders content as raw HTML (th:text is the safe form)"),
+    ("th-inline-unesc", re.compile(r'\[\(\$\{[^}]+\}\)\]'),
+     "high",   "Thymeleaf [(${...})] inline-unescape; [[${...}]] is the escaped form"),
+    ("jsoup-html",      re.compile(r'\.html\s*\(\s*(?![\'"`])'),
+     "medium", "jsoup Element.html(x) parses its argument as HTML"),
+    ("response-header", re.compile(r'\bresponse\s*\.\s*(?:setHeader|addHeader)\s*\('),
+     "low",    "response header write - reflecting user input into a header can enable XSS in old browsers or via error pages"),
+]
+JAVA_SOURCES = [
+    ("request.param",       re.compile(r'\brequest\s*\.\s*getParameter(?:Values|Map)?\s*\(')),
+    ("request.header",      re.compile(r'\brequest\s*\.\s*getHeader(?:Names|s)?\s*\(')),
+    ("request.cookies",     re.compile(r'\brequest\s*\.\s*getCookies\s*\(|\bCookie\s*\.\s*getValue\s*\(')),
+    ("request.body",        re.compile(r'\brequest\s*\.\s*getReader\s*\(|\bgetInputStream\s*\(')),
+    ("request.uri",         re.compile(r'\brequest\s*\.\s*(?:getRequestURI|getRequestURL|getQueryString|getPathInfo)\s*\(')),
+    ("spring-param",        re.compile(r'@RequestParam\b|@RequestHeader\b|@PathVariable\b|@CookieValue\b|@RequestBody\b|@ModelAttribute\b')),
+    ("session-attr",        re.compile(r'\bsession\s*\.\s*getAttribute\s*\(')),
+    ("system-in-input",     re.compile(r'\bSystem\s*\.\s*in\b|\bnew\s+Scanner\s*\(\s*System\s*\.\s*in\s*\)')),
+]
+
 ASSIGN = re.compile(r'^\s*(?:var|let|const)?\s*([A-Za-z_$][\w$]*)\s*=\s*(.+?)\s*;?\s*$')
 PHP_ASSIGN = re.compile(r'^\s*(\$[A-Za-z_]\w*)\s*=\s*(.+?)\s*;?\s*$')
+# Java: `Type name = expr;` or `name = expr;` (type is optional, may be generic)
+JAVA_ASSIGN = re.compile(
+    r'^\s*(?:(?:final|static|public|private|protected|volatile|synchronized)\s+)*'
+    r'(?:[\w<>\[\],?.\s]{1,80}?\s+)?'
+    r'([A-Za-z_]\w*)\s*=\s*(.+?)\s*;?\s*$'
+)
 # Escape-family calls that, if present on the same line as a source+sink,
 # strongly suggest the value was sanitised before hitting the sink. We can't
 # prove it (no AST), but we can DOWNGRADE HIGH -> MEDIUM to avoid the obvious
@@ -149,10 +187,15 @@ JS_ESCAPES = re.compile(
 CS_ESCAPES = re.compile(
     r'\b(?:HtmlEncoder\.(?:Default\.)?Encode|Html\.Encode|HttpUtility\.'
     r'HtmlEncode|WebUtility\.HtmlEncode|@\s*Html\.Encode)\s*\(')
+JAVA_ESCAPES = re.compile(
+    r'\b(?:StringEscapeUtils\.(?:escapeHtml|escapeHtml3|escapeHtml4|escapeXml)|'
+    r'HtmlUtils\.htmlEscape|Encode\.forHtml(?:Attribute|Content)?|'
+    r'ESAPI\.encoder\(\)\.encodeForHTML|SafeString|escapeHtml)\s*\(')
 CONF_RANK = {"low": 0, "medium": 1, "high": 2}
 JS_EXT = (".js", ".ts", ".jsx", ".tsx", ".mjs")
 CS_EXT = (".cs", ".cshtml", ".razor")
 PHP_EXT = (".php", ".phtml", ".php3", ".php4", ".php5", ".phps", ".inc")
+JAVA_EXT = (".java", ".jsp", ".jspx", ".tag")
 
 
 def source_hits(text, sources, msg_active):
@@ -197,12 +240,15 @@ def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
 
 def _lang_for(path):
     """Return (lang, sinks, sources, assign_re, wants_taint). lang is one of
-    'js', 'cs', 'php'; wants_taint tells scan_file whether to run compute_taint."""
+    'js', 'cs', 'php', 'java'; wants_taint tells scan_file whether to run
+    compute_taint (JS+PHP+Java yes, C# no - stays sink-only, deliberately)."""
     ext = os.path.splitext(path)[1].lower()
     if ext in JS_EXT:
         return "js", JS_SINKS, JS_SOURCES, ASSIGN, True
     if ext in PHP_EXT:
         return "php", PHP_SINKS, PHP_SOURCES, PHP_ASSIGN, True
+    if ext in JAVA_EXT:
+        return "java", JAVA_SINKS, JAVA_SOURCES, JAVA_ASSIGN, True
     return "cs", CS_SINKS, CS_SOURCES, ASSIGN, False
 
 
@@ -247,6 +293,7 @@ def scan_file(path):
             # the squelch entirely: they need eyes-on review anyway.
             if confidence == "high" and len(line) <= 500:
                 esc_re = (PHP_ESCAPES if lang == "php"
+                          else JAVA_ESCAPES if lang == "java"
                           else JS_ESCAPES if lang == "js" else CS_ESCAPES)
                 sink_pos = rx.search(line).start()
                 for em in esc_re.finditer(line):
@@ -269,7 +316,7 @@ def iter_files(target):
         if "node_modules" in root or "vendor" in root or os.sep + ".git" in root:
             continue
         for name in files:
-            if name.endswith(JS_EXT + CS_EXT + PHP_EXT):
+            if name.endswith(JS_EXT + CS_EXT + PHP_EXT + JAVA_EXT):
                 yield os.path.join(root, name)
 
 
