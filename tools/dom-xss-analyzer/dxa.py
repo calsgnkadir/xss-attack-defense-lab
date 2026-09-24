@@ -134,6 +134,44 @@ PHP_SOURCES = [
     ("Symfony-Request", re.compile(r'\$request\s*->\s*(?:query|request|cookies|headers|files|attributes)\b')),
 ]
 
+# --- Python sinks (Flask/Jinja + FastAPI + Django) --------------------------
+PY_SINKS = [
+    ("markupsafe-markup",   re.compile(r'\bMarkup\s*\('),
+     "high",   "markupsafe.Markup(x) marks the string as safe HTML - Jinja will render it raw"),
+    ("render-template-str", re.compile(r'\brender_template_string\s*\('),
+     "high",   "render_template_string(x) treats x itself as a Jinja template - full server-side template injection surface"),
+    ("django-mark-safe",    re.compile(r'\bmark_safe\s*\(|SafeString\s*\('),
+     "high",   "Django mark_safe / SafeString bypasses auto-escaping"),
+    ("django-format-html",  re.compile(r'\bformat_html(?:_join)?\s*\(\s*[\'"][^\'"]*%s'),
+     "medium", "format_html with a raw %s in the template placeholder"),
+    ("fastapi-html",        re.compile(r'\bHTMLResponse\s*\('),
+     "medium", "FastAPI HTMLResponse renders its argument as raw HTML"),
+    ("flask-response-html", re.compile(r'\bResponse\s*\([^)]*mimetype\s*=\s*[\'"]text/html[\'"]|make_response\s*\('),
+     "medium", "Flask Response/make_response with text/html mimetype and a dynamic body"),
+    ("jinja-safe-filter",   re.compile(r'\|\s*safe\b'),
+     "high",   "Jinja |safe filter disables auto-escaping (used on a value = raw HTML)"),
+    ("html-tostring",       re.compile(r'\blxml\.html\.tostring\s*\(|\bBeautifulSoup\s*\('),
+     "low",    "lxml/BeautifulSoup HTML build - source injection depends on where the result flows"),
+    ("os-system",           re.compile(r'\b(?:os\.system|os\.popen|subprocess\.(?:call|run|Popen))\s*\(\s*[a-zA-Z_]'),
+     "medium", "OS command sink - not XSS but a Python-only injection class worth flagging"),
+]
+PY_SOURCES = [
+    ("flask-request-arg",   re.compile(r'\brequest\s*\.\s*args\s*(?:\.\s*get\s*\(|\[)')),
+    ("flask-request-form",  re.compile(r'\brequest\s*\.\s*form\s*(?:\.\s*get\s*\(|\[)')),
+    ("flask-request-values",re.compile(r'\brequest\s*\.\s*values\s*(?:\.\s*get\s*\(|\[)')),
+    ("flask-request-json",  re.compile(r'\brequest\s*\.\s*get_json\s*\(|\brequest\s*\.\s*json\b')),
+    ("flask-request-cookie",re.compile(r'\brequest\s*\.\s*cookies\s*(?:\.\s*get\s*\(|\[)')),
+    ("flask-request-header",re.compile(r'\brequest\s*\.\s*headers\s*(?:\.\s*get\s*\(|\[)')),
+    ("flask-view-args",     re.compile(r'\brequest\s*\.\s*view_args\b')),
+    ("fastapi-param",       re.compile(r'=\s*(?:Query|Body|Header|Cookie|Path|Form|File)\s*\(')),
+    ("django-request-get",  re.compile(r'\brequest\s*\.\s*GET\s*(?:\.\s*get\s*\(|\[)')),
+    ("django-request-post", re.compile(r'\brequest\s*\.\s*POST\s*(?:\.\s*get\s*\(|\[)')),
+    ("django-request-meta", re.compile(r'\brequest\s*\.\s*META\s*(?:\.\s*get\s*\(|\[)')),
+    ("environ",             re.compile(r'\bos\.environ(?:\.\s*get\s*\(|\[)')),
+    ("input-stdin",         re.compile(r'\bsys\.stdin\.(?:read|readline)\b|\binput\s*\(')),
+]
+
+
 # --- Java / JSP / Thymeleaf sinks (server-side XSS: unescaped output) -------
 JAVA_SINKS = [
     ("servlet-writer",  re.compile(r'\b(?:getWriter\(\)|PrintWriter\s*\.\s*\w+)\s*\.\s*(?:print(?:ln)?|write|append)\s*\('),
@@ -174,6 +212,10 @@ JAVA_ASSIGN = re.compile(
     r'(?:[\w<>\[\],?.\s]{1,80}?\s+)?'
     r'([A-Za-z_]\w*)\s*=\s*(.+?)\s*;?\s*$'
 )
+# Python: `name = expr` or `name: type = expr` (no ; terminator, no let/var)
+PYTHON_ASSIGN = re.compile(
+    r'^\s*([A-Za-z_]\w*)\s*(?::\s*[\w\[\], .]+?\s*)?=\s*(.+?)\s*$'
+)
 # Escape-family calls that, if present on the same line as a source+sink,
 # strongly suggest the value was sanitised before hitting the sink. We can't
 # prove it (no AST), but we can DOWNGRADE HIGH -> MEDIUM to avoid the obvious
@@ -191,11 +233,15 @@ JAVA_ESCAPES = re.compile(
     r'\b(?:StringEscapeUtils\.(?:escapeHtml|escapeHtml3|escapeHtml4|escapeXml)|'
     r'HtmlUtils\.htmlEscape|Encode\.forHtml(?:Attribute|Content)?|'
     r'ESAPI\.encoder\(\)\.encodeForHTML|SafeString|escapeHtml)\s*\(')
+PY_ESCAPES = re.compile(
+    r'\b(?:html\.escape|markupsafe\.escape|escape|bleach\.clean|'
+    r'django\.utils\.html\.escape|escape_html|nh3\.clean|xml\.sax\.saxutils\.escape)\s*\(')
 CONF_RANK = {"low": 0, "medium": 1, "high": 2}
 JS_EXT = (".js", ".ts", ".jsx", ".tsx", ".mjs")
 CS_EXT = (".cs", ".cshtml", ".razor")
 PHP_EXT = (".php", ".phtml", ".php3", ".php4", ".php5", ".phps", ".inc")
 JAVA_EXT = (".java", ".jsp", ".jspx", ".tag")
+PY_EXT   = (".py", ".pyw")
 
 
 def source_hits(text, sources, msg_active):
@@ -240,8 +286,8 @@ def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
 
 def _lang_for(path):
     """Return (lang, sinks, sources, assign_re, wants_taint). lang is one of
-    'js', 'cs', 'php', 'java'; wants_taint tells scan_file whether to run
-    compute_taint (JS+PHP+Java yes, C# no - stays sink-only, deliberately)."""
+    'js', 'cs', 'php', 'java', 'py'; wants_taint tells scan_file whether to run
+    compute_taint (JS+PHP+Java+Python yes, C# no - stays sink-only)."""
     ext = os.path.splitext(path)[1].lower()
     if ext in JS_EXT:
         return "js", JS_SINKS, JS_SOURCES, ASSIGN, True
@@ -249,6 +295,8 @@ def _lang_for(path):
         return "php", PHP_SINKS, PHP_SOURCES, PHP_ASSIGN, True
     if ext in JAVA_EXT:
         return "java", JAVA_SINKS, JAVA_SOURCES, JAVA_ASSIGN, True
+    if ext in PY_EXT:
+        return "py", PY_SINKS, PY_SOURCES, PYTHON_ASSIGN, True
     return "cs", CS_SINKS, CS_SOURCES, ASSIGN, False
 
 
@@ -294,6 +342,7 @@ def scan_file(path):
             if confidence == "high" and len(line) <= 500:
                 esc_re = (PHP_ESCAPES if lang == "php"
                           else JAVA_ESCAPES if lang == "java"
+                          else PY_ESCAPES if lang == "py"
                           else JS_ESCAPES if lang == "js" else CS_ESCAPES)
                 sink_pos = rx.search(line).start()
                 for em in esc_re.finditer(line):
@@ -316,7 +365,7 @@ def iter_files(target):
         if "node_modules" in root or "vendor" in root or os.sep + ".git" in root:
             continue
         for name in files:
-            if name.endswith(JS_EXT + CS_EXT + PHP_EXT + JAVA_EXT):
+            if name.endswith(JS_EXT + CS_EXT + PHP_EXT + JAVA_EXT + PY_EXT):
                 yield os.path.join(root, name)
 
 

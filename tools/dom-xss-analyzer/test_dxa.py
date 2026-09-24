@@ -120,6 +120,45 @@ def test_php_lang_label_is_php():
     assert findings and all(x["lang"] == "php" for x in findings)
 
 
+# --- Python (Flask / FastAPI / Django) detection ----------------------------
+
+def test_python_render_template_string_from_request_is_high():
+    f = by_sink(scan("vulnerable.py"))
+    assert "render-template-str" in f
+    assert any(x["confidence"] == "high" and
+               ("flask-request-arg" in x["sources"] or x["tainted_vars"])
+               for x in f["render-template-str"])
+
+
+def test_python_markup_via_taint_is_high():
+    f = by_sink(scan("vulnerable.py"))
+    assert "markupsafe-markup" in f
+    assert any(x["confidence"] == "high" and x["tainted_vars"]
+               for x in f["markupsafe-markup"])
+
+
+def test_python_django_mark_safe_is_high():
+    f = by_sink(scan("vulnerable.py"))
+    assert "django-mark-safe" in f
+    assert any(x["confidence"] == "high" for x in f["django-mark-safe"])
+
+
+def test_python_lang_label_is_py():
+    findings = scan("vulnerable.py")
+    assert findings and all(x["lang"] == "py" for x in findings)
+
+
+def test_python_safe_file_has_no_high_confidence():
+    findings = scan("safe.py")
+    highs = [x for x in findings if x["confidence"] == "high"]
+    # every HIGH must have an escape function on the SAME line (proximity gate)
+    assert all(
+        any(esc in x["code"] for esc in
+            ("html.escape", "markupsafe.escape", "bleach.clean"))
+        for x in highs
+    ), f"unexpected HIGH without escape: {highs}"
+
+
 # --- Java / Servlet / Spring detection --------------------------------------
 
 def test_java_servlet_write_from_request_param_is_high():

@@ -12,6 +12,12 @@ likely **source → sink flows** between them — across a full-stack surface:
   (`response.getWriter().write` / `<%= %>` / `<c:out escapeXml="false">` /
   `th:utext` / `[(${...})]`; sources: `request.getParameter`,
   `@RequestParam`/`@RequestHeader`/`@PathVariable`/`@CookieValue`/`@RequestBody`)
+- **server side** — Python / Flask / FastAPI / Django / Jinja
+  (`Markup(x)` / `render_template_string(x)` / `mark_safe(x)` / `SafeString(x)` /
+  `HTMLResponse(x)` / `|safe` filter / `format_html(...%s...)`;
+  sources: `request.args/form/values/cookies/headers`, `request.get_json()`,
+  FastAPI `Query()/Body()/Header()/Cookie()/Path()`, Django `request.GET/POST/META`,
+  `os.environ`)
 
 It is the `source → sink` methodology from this repository
 ([`../../methodology.md`](../../methodology.md)) expressed as runnable code.
