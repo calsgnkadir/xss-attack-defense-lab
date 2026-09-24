@@ -217,7 +217,7 @@ def test_apply_cookie_rides_every_request():
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        _, _, body = dxadyn.fetch(f"http://127.0.0.1:{port}/anywhere")
+        _, _, body, _ = dxadyn.fetch(f"http://127.0.0.1:{port}/anywhere")
     finally:
         srv.shutdown()
         dxadyn.EXTRA_HEADERS.clear()
@@ -234,7 +234,7 @@ def test_apply_header_parses_name_value_and_rejects_junk():
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        _, _, body = dxadyn.fetch(f"http://127.0.0.1:{port}/")
+        _, _, body, _ = dxadyn.fetch(f"http://127.0.0.1:{port}/")
     finally:
         srv.shutdown()
         dxadyn.EXTRA_HEADERS.clear()
@@ -287,6 +287,72 @@ def test_probe_headers_leaves_no_lingering_headers():
     finally:
         srv.shutdown()
     assert "X-Forwarded-For" not in dxadyn.EXTRA_HEADERS
+
+
+# --- v3.7: Content-Type gate (JSON API false-positive squelch) -------------
+
+def test_is_html_response_defaults():
+    assert dxadyn._is_html_response("text/html; charset=utf-8")
+    assert dxadyn._is_html_response("application/xhtml+xml")
+    assert dxadyn._is_html_response("image/svg+xml")
+    assert dxadyn._is_html_response("")                       # empty -> lean HTML
+    assert dxadyn._is_html_response("text/xml")               # text/* default HTML
+    # non-HTML
+    assert not dxadyn._is_html_response("application/json")
+    assert not dxadyn._is_html_response("application/json; charset=utf-8")
+    assert not dxadyn._is_html_response("application/ld+json")
+    assert not dxadyn._is_html_response("text/plain")
+    assert not dxadyn._is_html_response("text/csv")
+
+
+def test_ct_gate_downgrades_json_body_to_json_only():
+    ctx, sev = dxadyn._apply_ct_gate("unencoded", "body", "application/json")
+    assert ctx == "json-body"
+    assert sev == "json-only"
+
+
+def test_ct_gate_leaves_html_body_as_executable():
+    ctx, sev = dxadyn._apply_ct_gate("unencoded", "body", "text/html")
+    assert ctx == "body"
+    assert sev == "executable"
+
+
+def test_ct_gate_html_title_is_still_breakout_req():
+    ctx, sev = dxadyn._apply_ct_gate("unencoded", "title", "text/html")
+    assert ctx == "title"
+    assert sev == "breakout-req"
+
+
+class _JsonReflector(BaseHTTPRequestHandler):
+    """Reflects the ?q= value RAW in a JSON body with Content-Type json.
+    The bot's older behaviour flagged this as [EXECUTABLE] context=body;
+    v3.7 must classify it as [JSON-ONLY] context=json-body."""
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = parse_qs(u.query).get("q", [""])[0]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(('{"echoed":"' + q + '"}').encode())
+
+
+def test_reflected_probe_marks_json_response_as_json_only():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _JsonReflector)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings = dxadyn.probe_link(f"http://127.0.0.1:{port}/api?q=x")
+    finally:
+        srv.shutdown()
+    assert findings, "must still record the raw reflection"
+    f = findings[0]
+    assert f["severity"] == "json-only", "must NOT be executable on JSON"
+    assert f["context"] == "json-body"
+    assert "application/json" in f["content_type"]
 
 
 # --- v3.6: PUT/PATCH/DELETE method support ----------------------------------

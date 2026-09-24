@@ -80,11 +80,10 @@ EXTRA_HEADERS = {}          # populated by --header / --cookie CLI flags (v3.1)
 
 
 def fetch(url, data=None, method=None):
-    """GET (data=None, method=None) or POST (data=dict, method=None), or any
-    HTTP method (method='PUT'|'PATCH'|'DELETE'|...). When `method` is set it
-    overrides the default. `data` may be `dict` (form-urlencoded), `bytes`
-    (raw body, used by `_fetch_json`), or None (no body).
-    Returns (status, final_url, body). EXTRA_HEADERS ride every request."""
+    """GET (data=None) / POST (data=dict) / any HTTP method (method='PUT'|...).
+    Returns (status, final_url, body, content_type). `content_type` comes from
+    the response Content-Type header (lowercased, empty string if missing) and
+    is what the v3.7 gate uses to distinguish `application/json` from HTML."""
     if isinstance(data, (bytes, bytearray)):
         body_bytes = bytes(data)
     elif data is None:
@@ -99,11 +98,14 @@ def fetch(url, data=None, method=None):
     req = urllib.request.Request(url, **kwargs)
     try:
         with OPENER.open(req, timeout=15) as resp:
-            return resp.status, resp.geturl(), resp.read().decode("utf-8", "ignore")
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            return (resp.status, resp.geturl(),
+                    resp.read().decode("utf-8", "ignore"), ct)
     except urllib.error.HTTPError as e:
-        return e.code, url, e.read().decode("utf-8", "ignore")
+        ct = (e.headers.get("Content-Type") if e.headers else "") or ""
+        return e.code, url, e.read().decode("utf-8", "ignore"), ct.lower()
     except Exception as e:                                    # noqa: BLE001
-        return None, url, f"__error__: {e}"
+        return None, url, f"__error__: {e}", ""
 
 
 def apply_cookie(cookie_header_value):
@@ -185,16 +187,63 @@ def context_executes(context):
 
 def _severity(reflection, context):
     """Combine verdict + context into a single severity label:
-      executable   - HIGH + body/unknown context: <img onerror> works as-is
-      breakout-req - HIGH + title/script/attr context: needs a follow-on payload
-      attr-breakout- verdict is 'attr-only' (a bare " survived)
-      -            - not a reportable case
-    """
+      executable    - HIGH + body/unknown context: <img onerror> works as-is
+      breakout-req  - HIGH + title/script/attr context: needs a follow-on payload
+      attr-breakout - verdict is 'attr-only' (a bare " survived)
+      json-only     - HIGH but response is JSON/text (not parsed as HTML)
+      -             - not a reportable case
+    v3.7 note: `json-only` is set by _apply_ct_gate() when Content-Type says
+    the browser will not render this response as HTML."""
     if reflection == "unencoded":
         return "executable" if context_executes(context) else "breakout-req"
     if reflection == "attr-only":
         return "attr-breakout"
     return "-"
+
+
+# --- v3.7: Content-Type gate ------------------------------------------------
+
+_HTML_LIKE_CT = ("text/html", "application/xhtml+xml", "image/svg+xml")
+_JSON_LIKE_CT = ("application/json", "application/ld+json", "text/json",
+                 "application/hal+json", "application/problem+json")
+
+
+def _is_html_response(content_type):
+    """True iff the browser will parse this response as HTML by default. Empty
+    or unknown CT is treated as HTML because sniffing is browser-default when
+    `X-Content-Type-Options: nosniff` is absent - we can't see that header
+    without a fuller response object, so lean toward reporting (fewer FNs)."""
+    if not content_type:
+        return True
+    ct = content_type.split(";", 1)[0].strip()
+    if ct in _HTML_LIKE_CT:
+        return True
+    # any text/* that isn't explicitly JSON/CSV/plain markup we treat as HTML
+    if ct.startswith("text/") and ct not in ("text/json", "text/plain",
+                                              "text/csv"):
+        return True
+    return False
+
+
+def _apply_ct_gate(reflection, context, content_type):
+    """v3.7: if the response is JSON (or non-HTML text), a body-context raw
+    reflection is NOT a browser-parsed HTML injection - it's an API echo that
+    the front-end still has to escape or `dangerouslySetInnerHTML` for XSS to
+    fire. Downgrade the severity so JSON-API false positives (the exact class
+    hotel-platform surfaced on the PUT /api/candidate/profile probe) don't
+    crowd out real findings.
+    Returns the possibly-adjusted (context, severity)."""
+    if _is_html_response(content_type):
+        return context, _severity(reflection, context)
+    # non-HTML response: the raw markup still crossed the trust boundary
+    # (it IS a stored/reflected value the app returns unescaped), but it
+    # will not execute in the browser without a downstream client-side sink.
+    # Keep the finding, tag context as `json-body`, severity `json-only`.
+    if reflection == "unencoded":
+        return "json-body", "json-only"
+    if reflection == "attr-only":
+        return "json-body", "-"                              # not meaningful in JSON
+    return context, "-"
 
 
 def dedupe_findings(findings):
@@ -300,16 +349,16 @@ def probe_form(form):
         data = {k: (canary if k == target else (form["fields"][k] or "dxa"))
                 for k in fields}
         if form["method"] == "post":
-            status, _, body = fetch(form["action"], data=data)
+            status, _, body, _ct = fetch(form["action"], data=data)
         else:
             url = form["action"] + ("&" if "?" in form["action"] else "?") + \
                 urllib.parse.urlencode(data)
-            status, _, body = fetch(url)
+            status, _, body, _ct = fetch(url)
         v = verdict(cid, body)
         if v in ("unencoded", "attr-only"):
             ctx = find_context(cid, body or "")
             out.append(_finding(form["action"], form["method"], target, v, status,
-                                context=ctx, canary_id=cid))
+                                context=ctx, canary_id=cid, content_type=_ct))
     return out
 
 
@@ -321,22 +370,25 @@ def probe_link(link):
         cid, canary = make_canary()
         newq = [(n, canary if j == i else v) for j, (n, v) in enumerate(params)]
         url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(newq)))
-        status, _, body = fetch(url)
+        status, _, body, _ct = fetch(url)
         v = verdict(cid, body)
         if v in ("unencoded", "attr-only"):
             ctx = find_context(cid, body or "")
             out.append(_finding(f"{parts.scheme}://{parts.netloc}{parts.path}",
                                 "GET", name, v, status,
-                                context=ctx, canary_id=cid))
+                                context=ctx, canary_id=cid, content_type=_ct))
     return out
 
 
-def _finding(where, method, param, v, status, context="unknown", canary_id=None):
+def _finding(where, method, param, v, status, context="unknown", canary_id=None,
+             content_type=""):
     conf = "high" if v == "unencoded" else "medium"
+    # v3.7: CT gate downgrades body-context XSS on JSON/text-plain responses
+    ctx, sev = _apply_ct_gate(v, context, content_type)
     return {"url": where, "method": method.upper(), "param": param,
             "reflection": v, "confidence": conf, "status": status,
-            "context": context, "severity": _severity(v, context),
-            "canary_id": canary_id}
+            "context": ctx, "severity": sev,
+            "canary_id": canary_id, "content_type": content_type}
 
 
 def crawl(base_url, depth):
@@ -347,7 +399,7 @@ def crawl(base_url, depth):
         if url in seen_pages:
             continue
         seen_pages.add(url)
-        status, final, body = fetch(url)
+        status, final, body, _ct = fetch(url)
         if not body or body.startswith("__error__"):
             continue
         forms, links = discover(final, body)
@@ -394,7 +446,7 @@ def login(login_url, user, password, user_field="username", pass_field="password
     """Log in through a standard HTML form. Session cookies live in `OPENER`.
     Success = the POST either landed us on a different URL (redirect out of
     the login page) *or* set at least one new cookie we did not have before."""
-    status, _, body = fetch(login_url)
+    status, _, body, _ct = fetch(login_url)
     if status is None:
         return False
 
@@ -408,7 +460,7 @@ def login(login_url, user, password, user_field="username", pass_field="password
     if extra:
         data.update(extra)
 
-    st, final_url, _ = fetch(login_url, data=data)
+    st, final_url, _, _ct = fetch(login_url, data=data)
     if st is None:
         return False
     after = len(list(jar)) if jar is not None else 0
@@ -448,14 +500,15 @@ def probe_stored(target_url, target_field, extra_fields, check_urls,
     out = []
     for raw_url in check_urls:
         url = raw_url.replace("{CID}", cid)
-        st, _, body = fetch(url)
+        st, _, body, _ct = fetch(url)
         v = verdict(cid, body or "")
         if v in ("unencoded", "attr-only"):
-            ctx = find_context(cid, body or "")
+            raw_ctx = find_context(cid, body or "")
+            ctx, sev = _apply_ct_gate(v, raw_ctx, _ct)
             out.append({"target": target_url, "field": label, "check_url": url,
                         "reflection": v, "confidence": "high" if v == "unencoded" else "medium",
                         "sub_status": sub_status, "check_status": st, "canary_id": cid,
-                        "context": ctx, "severity": _severity(v, ctx)})
+                        "context": ctx, "severity": sev, "content_type": _ct})
     return out, cid
 
 
@@ -503,7 +556,7 @@ def _submit_form(target_url, target_field, extra_fields, canary,
     as urlencoded body with the explicit method. Returns (status, final_url)."""
     tok = None
     if csrf_field:
-        st, _, body = fetch(target_url)
+        st, _, body, _ct = fetch(target_url)
         if st is not None:
             tok = _extract_csrf(body, csrf_field)
     data = dict(extra_fields or {})
@@ -513,11 +566,11 @@ def _submit_form(target_url, target_field, extra_fields, canary,
     m = method.upper()
     if m == "GET":
         sep = "&" if "?" in target_url else "?"
-        st, final, _ = fetch(target_url + sep + urllib.parse.urlencode(data))
+        st, final, _, _ct = fetch(target_url + sep + urllib.parse.urlencode(data))
     elif m == "POST":
-        st, final, _ = fetch(target_url, data=data)
+        st, final, _, _ct = fetch(target_url, data=data)
     else:
-        st, final, _ = fetch(target_url, data=data, method=m)
+        st, final, _, _ct = fetch(target_url, data=data, method=m)
     return st, final
 
 
@@ -542,7 +595,7 @@ def _submit_json(target_url, json_template, canary, method="POST"):
     which callers pass through. Returns (submit_status, landing_url)."""
     safe = json_template.replace("{CANARY}", canary
         .replace("\\", "\\\\").replace('"', '\\"'))
-    st, final, _ = _fetch_json(target_url, safe.encode("utf-8"), method=method)
+    st, final, _, _ct = _fetch_json(target_url, safe.encode("utf-8"), method=method)
     return st, final
 
 
@@ -554,12 +607,12 @@ def _submit_header(target_url, header_name, canary, method="GET"):
     m = method.upper()
     try:
         if m == "GET":
-            st, final, _ = fetch(target_url)
+            st, final, _, _ct = fetch(target_url)
         elif m == "POST":
-            st, final, _ = fetch(target_url, data={})
+            st, final, _, _ct = fetch(target_url, data={})
         else:
             # PUT/PATCH/DELETE with empty body
-            st, final, _ = fetch(target_url, data=b"", method=m)
+            st, final, _, _ct = fetch(target_url, data=b"", method=m)
     finally:
         EXTRA_HEADERS.pop(header_name, None)
     return st, final
@@ -593,7 +646,7 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
         if seed not in seen:
             seen.add(seed)
             candidates.append(seed)
-        st, _, body = fetch(seed)
+        st, _, body, _ct = fetch(seed)
         if not body or body.startswith("__error__"):
             continue
         for link in _all_links(seed, body):
@@ -612,19 +665,20 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
              ("json" if json_body is not None else target_field))
     findings, checked = [], 0
     for url in candidates:
-        st, _, body = fetch(url)
+        st, _, body, _ct = fetch(url)
         checked += 1
         if not body or cid not in body:
             continue
         v = verdict(cid, body)
         if v in ("unencoded", "attr-only"):
-            ctx = find_context(cid, body or "")
+            raw_ctx = find_context(cid, body or "")
+            ctx, sev = _apply_ct_gate(v, raw_ctx, _ct)
             findings.append({"target": target_url, "field": label,
                              "check_url": url, "reflection": v,
                              "confidence": "high" if v == "unencoded" else "medium",
                              "sub_status": sub_status, "check_status": st,
                              "canary_id": cid, "auto_discovered": True,
-                             "context": ctx, "severity": _severity(v, ctx)})
+                             "context": ctx, "severity": sev, "content_type": _ct})
 
     # dedupe: same canary + reflection + context on many pages = one bug
     findings = dedupe_findings(findings)
@@ -643,18 +697,19 @@ def probe_headers(url, header_names):
         cid, canary = make_canary()
         EXTRA_HEADERS[name] = canary
         try:
-            status, _, body = fetch(url)
+            status, _, body, _ct = fetch(url)
         finally:
             EXTRA_HEADERS.pop(name, None)
         v = verdict(cid, body or "")
         if v in ("unencoded", "attr-only"):
-            ctx = find_context(cid, body or "")
+            raw_ctx = find_context(cid, body or "")
+            ctx, sev = _apply_ct_gate(v, raw_ctx, _ct)
             findings.append({
                 "url": url, "method": "GET", "param": f"header:{name}",
                 "reflection": v,
                 "confidence": "high" if v == "unencoded" else "medium",
                 "status": status, "context": ctx,
-                "severity": _severity(v, ctx), "canary_id": cid,
+                "severity": sev, "canary_id": cid, "content_type": _ct,
             })
     return findings
 

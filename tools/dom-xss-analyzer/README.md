@@ -362,14 +362,39 @@ The method routes through `_submit_form`, `_submit_json`, and `_submit_header`
 uniformly; the underlying `fetch()` sets Python's `Request(method=...)` when a
 non-default HTTP verb is asked for.
 
-**Honest gap surfaced by this feature: JSON response context.** Once dxadyn can
-reach a REST endpoint, it starts seeing responses like
-`{"fullName":"dxa..\"<dXsS>"}` and — because the canary markup survives raw in
-the body bytes — currently flags them as `[EXECUTABLE] context=body`. That is a
-false positive: `Content-Type: application/json` (especially with
-`X-Content-Type-Options: nosniff`) means the browser parses this as JSON, not
-HTML, so no XSS actually fires — and any React/Vue/Angular front-end will then
-`{value}`-escape the string when it renders. The **real** XSS in that world
-lives one layer up in the client. A `v3.7` gate that inspects `Content-Type`
-before scoring reflection would kill this class of FP; it's a documented,
-prioritised follow-up.
+### v3.7 - Content-Type gate (JSON API false-positive squelch)
+
+The gap v3.6 surfaced: on a REST endpoint that echoes the canary raw in a
+JSON response body (`{"fullName":"dxa...\"<dXsS>"}`), the older scoring said
+`[EXECUTABLE] context=body` — but the browser parses this as JSON, not HTML,
+so nothing actually executes. That's a false positive, and it drowns out real
+findings on any modern SPA + REST target.
+
+v3.7 fixes it by reading the response `Content-Type` and downgrading:
+
+- `text/html`, `application/xhtml+xml`, `image/svg+xml`, and `text/*` (except
+  json/plain/csv) → HTML-like: existing severity applies.
+- Empty / unknown Content-Type → treated as HTML (browser default; lean
+  toward reporting rather than missing).
+- `application/json`, `application/ld+json`, `application/hal+json`,
+  `application/problem+json`, `text/json`, `text/plain`, `text/csv` →
+  non-HTML: severity is downgraded from `executable` / `breakout-req` to
+  `json-only`, context is retagged `json-body`.
+
+The reflection **is still reported** — the app IS returning an attacker value
+unescaped across a trust boundary; a front-end that then hands it to
+`dangerouslySetInnerHTML` (or `v-html`, or `[innerHTML]`) turns it into a
+real XSS. The gate just moves it out of the "runs as-is in the browser"
+bucket so a real HTML XSS on the same target isn't buried under 20 JSON echoes.
+
+`_apply_ct_gate(reflection, context, content_type)` runs in `_finding()`
+(reflected/link/form) and inline in `probe_stored` / `probe_stored_auto` /
+`probe_headers`, so every submission shape benefits without duplicating logic.
+`fetch()` was widened to return `(status, final_url, body, content_type)`;
+every call site was updated to unpack the fourth value.
+
+5 new tests (61/61 pytest): CT-family classification, gate downgrade for
+JSON body, HTML body kept as `executable`, HTML title kept as `breakout-req`,
+and an end-to-end reflected probe against a JSON reflector that must be
+labelled `json-only` (this is the hotel-platform live-fire scenario made
+reproducible in a fixture).

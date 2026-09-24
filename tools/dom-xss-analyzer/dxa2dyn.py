@@ -109,7 +109,7 @@ def probe_hints(target_url, hint_params):
         cid, canary = dxadyn.make_canary()
         sep = "&" if "?" in target_url else "?"
         url = f"{target_url}{sep}{name}={urllib.parse.quote(canary)}"
-        status, _, body = dxadyn.fetch(url)
+        status, _, body, _ct = dxadyn.fetch(url)
         v = dxadyn.verdict(cid, body or "")
         if v in ("unencoded", "attr-only"):
             out.append({
