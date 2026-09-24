@@ -260,11 +260,65 @@ def source_hits(text, sources, msg_active):
     return hits
 
 
+# v3.8 cross-method sanitizer awareness. If a RHS contains a call to any
+# name that "looks like" a sanitizer / escape / validate helper (either an
+# OWASP-standard one or a local `sanitize(...)` / `cleanInput(...)` /
+# `validateXxx(...)` helper), we treat that assignment as breaking the taint
+# chain. This is a heuristic (no AST, no follow-into) - matches the exact
+# hotel-platform case where CorrelationIdFilter does
+#   String cid = ... ? sanitize(inbound) : shortUuid();
+# and the older gate had no way to see `sanitize()`. Aggressive: any such
+# call in the RHS kills the propagation for THAT line. Conservative: if the
+# name doesn't match the hint pattern, taint still flows.
+_SANITIZE_HINT = re.compile(
+    r'\b\w*(?:sanitiz|clean|validat|escape|escap|htmlspecial|'
+    r'strip|filter|encode|purif|Markup|SafeString|bleach|nh3|'
+    r'StringEscapeUtils|HtmlUtils|Encode\.forHtml|markupsafe\.escape|'
+    r'html\.escape|HtmlEncoder|WebUtility\.HtmlEncode|HttpUtility\.HtmlEncode)'
+    r'\w*\s*\(',
+    re.IGNORECASE,
+)
+
+
+def _joined_for_taint(lines, terminator=";", max_join=8):
+    """Return a list the same length as `lines`. Each entry is the original
+    line concatenated with continuation lines up to the next `terminator`
+    (default `;`). Preserves indexing so tainted-set computation sees complete
+    multi-line statements (Java/C# ternaries, long argument lists) without
+    breaking scan_file's per-line reporting. v3.8 addition - needed to catch
+    the exact hotel-platform shape:
+        String cid = (inbound != null && ...)
+                ? sanitize(inbound)
+                : shortUuid();
+    which otherwise splits across 3 lines and hides the sanitize()."""
+    joined = list(lines)
+    for i, line in enumerate(lines):
+        s = line.strip()
+        # already terminated on this line, or a block delimiter, or empty
+        if terminator in line or not s or s.endswith(("{", "}")) or s.startswith(("//", "#")):
+            continue
+        buf = line
+        for k in range(1, max_join + 1):
+            if i + k >= len(lines):
+                break
+            nxt = lines[i + k]
+            buf = buf + " " + nxt.strip()
+            if terminator in nxt:
+                break
+        joined[i] = buf
+    return joined
+
+
 def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
     """A var is tainted if assigned from a source or another tainted var.
     Bounded fix-point - a cheap approximation of straight-line data flow.
-    Runs on both JS (variable-name identifiers) and PHP (`$name` identifiers);
-    the caller picks the assign regex to match the target language."""
+    Runs on JS, PHP, Java, Python (each with its own assign regex).
+
+    v3.8: if the RHS contains a sanitize-family call (`sanitize(...)`,
+    `clean(...)`, `StringEscapeUtils.escapeHtml4(...)`, `html.escape(...)`,
+    local `validateXxx(...)`, ...), the assignment BREAKS the taint chain.
+    This kills the cross-method-helper false positive that pure same-line
+    regex analysis can't otherwise see."""
     tainted = set()
     for _ in range(6):
         changed = False
@@ -273,6 +327,9 @@ def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
             if not m:
                 continue
             lhs, rhs = m.group(1), m.group(2)
+            # cross-method sanitizer wrap -> do not propagate taint
+            if _SANITIZE_HINT.search(rhs):
+                continue
             if source_hits(rhs, sources, msg_active) or any(
                 re.search(r'(?<!\w)' + re.escape(v) + r'\b', rhs) for v in tainted
             ):
@@ -310,7 +367,11 @@ def scan_file(path):
         return []
 
     msg_active = lang == "js" and bool(MSG_LISTENER.search("\n".join(lines)))
-    tainted = (compute_taint(lines, sources, msg_active, assign_re)
+    # Java/C# statements often span lines (ternaries, long argument lists,
+    # generic types); join by `;` before taint so multi-line sanitize()
+    # wraps are visible. JS/PHP/Python usually single-line - default OK.
+    taint_view = _joined_for_taint(lines) if lang in ("java", "cs") else lines
+    tainted = (compute_taint(taint_view, sources, msg_active, assign_re)
                if wants_taint else set())
     dynamic = re.compile(r'[A-Za-z_$@][\w$]*')
 

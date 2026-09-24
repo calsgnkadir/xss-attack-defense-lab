@@ -87,6 +87,74 @@ def test_taint_propagates_across_assignments():
     assert "a" in tainted and "b" in tainted
 
 
+# --- v3.8: cross-method sanitizer awareness ---------------------------------
+
+def test_taint_broken_by_local_sanitize_call_java():
+    # sanitize(...) in RHS -> cid does NOT inherit taint from inbound
+    lines = [
+        'String inbound = request.getParameter("q");',
+        'String cid = sanitize(inbound);',
+        'response.getWriter().write(cid);',
+    ]
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, False, dxa.JAVA_ASSIGN)
+    assert "inbound" in tainted, "the source assign is still tainted"
+    assert "cid" not in tainted, "sanitize(...) must break the chain"
+
+
+def test_taint_broken_by_local_clean_call_java():
+    lines = [
+        'String raw = request.getHeader("X");',
+        'String safe = cleanInput(raw);',
+    ]
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, False, dxa.JAVA_ASSIGN)
+    assert "raw" in tainted
+    assert "safe" not in tainted
+
+
+def test_taint_broken_by_owasp_encoder_java():
+    # Existing OWASP escape families should also cut the taint at assign-time
+    lines = [
+        'String q = request.getParameter("q");',
+        'String out = Encode.forHtml(q);',
+    ]
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, False, dxa.JAVA_ASSIGN)
+    assert "q" in tainted
+    assert "out" not in tainted
+
+
+def test_taint_still_flows_without_sanitize_java():
+    # Sanity: no sanitizer -> taint DOES propagate (control case)
+    lines = [
+        'String q = request.getParameter("q");',
+        'String out = "hello " + q;',
+    ]
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, False, dxa.JAVA_ASSIGN)
+    assert "q" in tainted and "out" in tainted
+
+
+def test_ternary_with_sanitize_in_one_branch_breaks_taint():
+    # The CorrelationIdFilter hotel-platform shape: ternary with sanitize
+    lines = [
+        'String inbound = request.getHeader("X-Correlation-Id");',
+        'String cid = (inbound != null) ? sanitize(inbound) : shortUuid();',
+    ]
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, False, dxa.JAVA_ASSIGN)
+    assert "inbound" in tainted
+    assert "cid" not in tainted, "ternary with sanitize() branch must break taint"
+
+
+def test_sanitize_hint_python_variant():
+    lines = [
+        'q = request.args.get("q")',
+        'safe = html.escape(q)',
+        'raw = "hello " + q',        # control: still propagates
+    ]
+    tainted = dxa.compute_taint(lines, dxa.PY_SOURCES, False, dxa.PYTHON_ASSIGN)
+    assert "q" in tainted
+    assert "safe" not in tainted
+    assert "raw" in tainted
+
+
 def test_navigation_not_double_reported_as_src_href():
     findings = scan("vulnerable.js")
     line29 = [x for x in findings if x["line"] == 29]

@@ -59,6 +59,16 @@ offending line for every finding — both JavaScript (DOM XSS) and C#/.NET.*
    `HttpUtility.HtmlEncode`, ...) is on the same line as the sink, HIGH is
    downgraded to MEDIUM — the value is more likely sanitised than not, and the
    operator's attention should go to the un-escaped lines.
+5. **Cross-method sanitizer awareness (v3.8).** If a taint assignment's RHS
+   contains a call to any sanitize-family helper — either a well-known encoder
+   (`StringEscapeUtils`, `HtmlUtils`, `Encode.forHtml`, `html.escape`,
+   `markupsafe.escape`, `DOMPurify`, `HttpUtility.HtmlEncode`) or a local one
+   whose name matches the `sanitize|clean|validate|filter|strip|encode|escape`
+   pattern — the assignment BREAKS the taint chain. Multi-line statements
+   (Java/C# ternaries, long argument lists) are joined by `;` before this
+   check so the sanitize wrap is visible even when spread across lines. This
+   was the specific fix for the hotel-platform `CorrelationIdFilter` case where
+   `String cid = ... ? sanitize(inbound) : shortUuid();` split across 3 lines.
 
 ## Usage
 
