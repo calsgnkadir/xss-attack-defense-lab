@@ -279,6 +279,17 @@ _SANITIZE_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# v3.9 finding dedup. When the same line matches multiple sink patterns that
+# overlap semantically (a specific one is a subset of a general one), report
+# ONLY the general - the specific was there for extra clarity but a single
+# HIGH row per line is what the operator wants.
+# Pairs are (specific, general): if `general` also matched on this line,
+# drop the specific finding.
+SINK_SUPPRESSIONS = [
+    ("src-href",       "navigation"),      # location.href/src writes -> navigation covers it
+    ("response-write", "servlet-writer"),  # response.getWriter().*() also matches servlet-writer
+]
+
 
 def _joined_for_taint(lines, terminator=";", max_join=8):
     """Return a list the same length as `lines`. Each entry is the original
@@ -378,11 +389,11 @@ def scan_file(path):
     findings = []
     for lineno, line in enumerate(lines, 1):
         matched_here = {sid for sid, rx, *_ in sinks if rx.search(line)}
+        # v3.9 dedup: drop specific sinks when the general one already matched
+        suppressed = {specific for specific, general in SINK_SUPPRESSIONS
+                      if specific in matched_here and general in matched_here}
         for sid, rx, severity, desc in sinks:
-            if sid not in matched_here:
-                continue
-            # `location.href =` is already 'navigation'; don't double-report it.
-            if sid == "src-href" and "navigation" in matched_here:
+            if sid not in matched_here or sid in suppressed:
                 continue
             srcs = source_hits(line, sources, msg_active)
             tvars = [v for v in tainted

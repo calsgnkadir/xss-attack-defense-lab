@@ -162,6 +162,31 @@ def test_navigation_not_double_reported_as_src_href():
     assert "navigation" in sinks and "src-href" not in sinks
 
 
+def test_response_write_suppressed_when_servlet_writer_matches():
+    """A line matching both `servlet-writer` (general getWriter().*) AND
+    `response-write` (specific response.getWriter().*) must produce ONE
+    finding per severity, not two - the specific one is dropped when the
+    general one is present. Closes the hotel-platform IdempotencyFilter
+    double-report case."""
+    findings = scan("vulnerable.java")
+    by_line = {}
+    for f in findings:
+        by_line.setdefault(f["line"], set()).add(f["sink"])
+    # every line that has BOTH must have `response-write` dropped
+    for ln, sinks in by_line.items():
+        if "servlet-writer" in sinks and "response-write" in sinks:
+            raise AssertionError(
+                f"line {ln} has both servlet-writer AND response-write "
+                f"(should be deduped): {sinks}")
+
+
+def test_sink_suppression_table_intact():
+    # regression: existing (src-href, navigation) pair still present
+    pairs = dict(dxa.SINK_SUPPRESSIONS)
+    assert pairs.get("src-href") == "navigation"
+    assert pairs.get("response-write") == "servlet-writer"
+
+
 # --- PHP detection (v3.4 addition) ------------------------------------------
 
 def test_php_echo_of_superglobal_is_high():
