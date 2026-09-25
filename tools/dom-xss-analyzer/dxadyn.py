@@ -405,58 +405,72 @@ def discover(base_url, body):
     return forms, links
 
 
-def probe_form(form):
-    """Inject a canary into each field in turn; report unencoded reflections."""
+def probe_form(form, variants=None, waf_bypass=False):
+    """Inject a canary into each field in turn; report unencoded reflections.
+    v3.10: fan-out through `variants` (+ optional --waf-bypass mutations).
+    Default single-variant behaviour preserved."""
+    variants = variants or ["body"]
     out = []
     fields = list(form["fields"]) or []
     for target in fields:
-        cid, canary = make_canary()
-        data = {k: (canary if k == target else (form["fields"][k] or "dxa"))
-                for k in fields}
-        if form["method"] == "post":
-            status, _, body, _ct = fetch(form["action"], data=data)
-        else:
-            url = form["action"] + ("&" if "?" in form["action"] else "?") + \
-                urllib.parse.urlencode(data)
-            status, _, body, _ct = fetch(url)
-        v = verdict(cid, body)
-        if v in ("unencoded", "attr-only"):
-            ctx = find_context(cid, body or "")
-            out.append(_finding(form["action"], form["method"], target, v, status,
-                                context=ctx, canary_id=cid, content_type=_ct))
+        for vname, cid, canary, marker in make_canaries_for(variants, waf_bypass):
+            data = {k: (canary if k == target else (form["fields"][k] or "dxa"))
+                    for k in fields}
+            if form["method"] == "post":
+                status, _, body, _ct = fetch(form["action"], data=data)
+            else:
+                url = form["action"] + ("&" if "?" in form["action"] else "?") + \
+                    urllib.parse.urlencode(data)
+                status, _, body, _ct = fetch(url)
+            v = verdict(cid, body, marker)
+            if v in ("unencoded", "attr-only"):
+                ctx = find_context(cid, body or "")
+                out.append(_finding(form["action"], form["method"], target, v, status,
+                                    context=ctx, canary_id=cid, content_type=_ct,
+                                    variant=vname))
     return out
 
 
-def probe_link(link):
+def probe_link(link, variants=None, waf_bypass=False):
+    """Inject a canary into each existing GET param in turn; v3.10: fan-out."""
+    variants = variants or ["body"]
     out = []
     parts = urllib.parse.urlsplit(link)
     params = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
     for i, (name, _) in enumerate(params):
-        cid, canary = make_canary()
-        newq = [(n, canary if j == i else v) for j, (n, v) in enumerate(params)]
-        url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(newq)))
-        status, _, body, _ct = fetch(url)
-        v = verdict(cid, body)
-        if v in ("unencoded", "attr-only"):
-            ctx = find_context(cid, body or "")
-            out.append(_finding(f"{parts.scheme}://{parts.netloc}{parts.path}",
-                                "GET", name, v, status,
-                                context=ctx, canary_id=cid, content_type=_ct))
+        for vname, cid, canary, marker in make_canaries_for(variants, waf_bypass):
+            newq = [(n, canary if j == i else v) for j, (n, v) in enumerate(params)]
+            url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(newq)))
+            status, _, body, _ct = fetch(url)
+            v = verdict(cid, body, marker)
+            if v in ("unencoded", "attr-only"):
+                ctx = find_context(cid, body or "")
+                out.append(_finding(f"{parts.scheme}://{parts.netloc}{parts.path}",
+                                    "GET", name, v, status,
+                                    context=ctx, canary_id=cid, content_type=_ct,
+                                    variant=vname))
     return out
 
 
 def _finding(where, method, param, v, status, context="unknown", canary_id=None,
-             content_type=""):
+             content_type="", variant="body"):
     conf = "high" if v == "unencoded" else "medium"
-    # v3.7: CT gate downgrades body-context XSS on JSON/text-plain responses
-    ctx, sev = _apply_ct_gate(v, context, content_type)
+    # v3.7 + v3.10: CT gate + variant-aware severity
+    ctx, sev = _apply_ct_gate(v, context, content_type, variant)
     return {"url": where, "method": method.upper(), "param": param,
             "reflection": v, "confidence": conf, "status": status,
             "context": ctx, "severity": sev,
-            "canary_id": canary_id, "content_type": content_type}
+            "canary_id": canary_id, "content_type": content_type,
+            "variant": variant}
 
 
-def crawl(base_url, depth):
+def crawl(base_url, depth, variants=None, waf_bypass=False):
+    """Reflected-mode crawler. v3.10: `variants` + `waf_bypass` fan-out is
+    plumbed through to every probe_form / probe_link call so a single
+    reflected-mode run can try body / title-breakout / attr-breakout /
+    script-breakout / url-scheme (+ optional 4 WAF mutations each) on
+    every form field and GET param it discovers."""
+    variants = variants or ["body"]
     seen_pages, findings, queue = set(), [], [(base_url, depth)]
     host = urllib.parse.urlsplit(base_url).netloc
     while queue:
@@ -469,17 +483,18 @@ def crawl(base_url, depth):
             continue
         forms, links = discover(final, body)
         for f in forms:
-            findings += probe_form(f)
+            findings += probe_form(f, variants=variants, waf_bypass=waf_bypass)
         for l in links:
-            findings += probe_link(l)
+            findings += probe_link(l, variants=variants, waf_bypass=waf_bypass)
         if d > 0:
             for l in links:
                 if urllib.parse.urlsplit(l).netloc == host and l not in seen_pages:
                     queue.append((l.split("?")[0], d - 1))
-    # de-dupe on (url, param, reflection)
+    # de-dupe on (url, param, reflection, variant) - variant-aware so a
+    # body + title-breakout reflection on the same param stays as 2 rows
     uniq, keys = [], set()
     for f in findings:
-        k = (f["url"], f["param"], f["reflection"])
+        k = (f["url"], f["param"], f["reflection"], f.get("variant", "body"))
         if k not in keys:
             keys.add(k)
             uniq.append(f)
@@ -776,31 +791,32 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
                                  "candidates": len(candidates)}
 
 
-def probe_headers(url, header_names):
-    """Send `url` once per header in `header_names`, each carrying a fresh
-    canary in that header value, and verdict the response. Catches the class
-    of stored/reflected XSS where an app writes an incoming header (e.g.
-    X-Forwarded-For, True-Client-IP, Referer, User-Agent) into a page - Bludit's
-    Finding #8 in this repo is the canonical example."""
+def probe_headers(url, header_names, variants=None, waf_bypass=False):
+    """Send `url` per header × per variant, each carrying a fresh canary in
+    that header value, and verdict the response. v3.10: variants fan-out
+    means a header probe can try body / title-breakout / attr-breakout /
+    script-breakout / url-scheme (+ optional 4 WAF mutations) per header."""
+    variants = variants or ["body"]
     findings = []
     for name in header_names:
-        cid, canary = make_canary()
-        EXTRA_HEADERS[name] = canary
-        try:
-            status, _, body, _ct = fetch(url)
-        finally:
-            EXTRA_HEADERS.pop(name, None)
-        v = verdict(cid, body or "")
-        if v in ("unencoded", "attr-only"):
-            raw_ctx = find_context(cid, body or "")
-            ctx, sev = _apply_ct_gate(v, raw_ctx, _ct)
-            findings.append({
-                "url": url, "method": "GET", "param": f"header:{name}",
-                "reflection": v,
-                "confidence": "high" if v == "unencoded" else "medium",
-                "status": status, "context": ctx,
-                "severity": sev, "canary_id": cid, "content_type": _ct,
-            })
+        for vname, cid, canary, marker in make_canaries_for(variants, waf_bypass):
+            EXTRA_HEADERS[name] = canary
+            try:
+                status, _, body, _ct = fetch(url)
+            finally:
+                EXTRA_HEADERS.pop(name, None)
+            v = verdict(cid, body or "", marker)
+            if v in ("unencoded", "attr-only"):
+                raw_ctx = find_context(cid, body or "")
+                ctx, sev = _apply_ct_gate(v, raw_ctx, _ct, vname)
+                findings.append({
+                    "url": url, "method": "GET", "param": f"header:{name}",
+                    "reflection": v,
+                    "confidence": "high" if v == "unencoded" else "medium",
+                    "status": status, "context": ctx,
+                    "severity": sev, "canary_id": cid, "content_type": _ct,
+                    "variant": vname,
+                })
     return findings
 
 
@@ -1119,17 +1135,38 @@ def main():
     # --- reflected (v1) path ---
     if not args.url:
         ap.error("either a positional URL (reflected mode) or --stored is required")
-    print(f"[dxadyn] probing {args.url} (depth={args.depth}) - authorized/local only\n")
-    findings = crawl(args.url, args.depth)
+
+    # v3.10: reflected mode also honours --variants + --waf-bypass
+    vraw = (args.variants or "body").strip().lower()
+    if vraw == "all":
+        variants = list(PAYLOAD_VARIANTS.keys())
+    else:
+        variants = [v.strip() for v in vraw.split(",") if v.strip()]
+        unknown = [v for v in variants if v not in PAYLOAD_VARIANTS]
+        if unknown:
+            print(f"[dxadyn] unknown --variants: {unknown}. Valid: "
+                  f"{list(PAYLOAD_VARIANTS.keys())} or 'all'", file=sys.stderr)
+            sys.exit(2)
+    vlabel = "" if variants == ["body"] else f" variants=[{','.join(variants)}]"
+    if args.waf_bypass:
+        vlabel += " +waf-bypass(x4/variant)"
+
+    print(f"[dxadyn] probing {args.url} (depth={args.depth}){vlabel} - authorized/local only\n")
+    findings = crawl(args.url, args.depth, variants=variants, waf_bypass=args.waf_bypass)
     if args.probe_headers:
         hdrs = [h.strip() for h in args.probe_headers.split(",") if h.strip()]
         print(f"[dxadyn] header probe: {', '.join(hdrs)}")
-        findings += probe_headers(args.url, hdrs)
+        findings += probe_headers(args.url, hdrs, variants=variants,
+                                  waf_bypass=args.waf_bypass)
 
     if args.html:
         meta = {"depth": str(args.depth)}
         if args.probe_headers:
             meta["probe_headers"] = args.probe_headers
+        if variants != ["body"]:
+            meta["variants"] = ",".join(variants)
+        if args.waf_bypass:
+            meta["waf_bypass"] = "on"
         with open(args.html, "w", encoding="utf-8") as fh:
             fh.write(render_html(findings, args.url, "reflected", meta))
         print(f"[dxadyn] HTML report -> {args.html}")
@@ -1143,7 +1180,9 @@ def main():
             else "attribute-breakout quote"
         ctx = f.get("context", "?")
         sev = f.get("severity", "-")
-        print(f"{f['url']}  [{sev.upper()}] context={ctx}  "
+        variant = f.get("variant", "body")
+        vtag = f" variant={variant}" if variant != "body" else ""
+        print(f"{f['url']}  [{sev.upper()}] context={ctx}{vtag}  "
               f"{f['method']} param '{f['param']}'  -> {tag}  (HTTP {f['status']})")
     execs = sum(1 for f in findings if f.get("severity") == "executable")
     breakout = sum(1 for f in findings if f.get("severity") == "breakout-req")

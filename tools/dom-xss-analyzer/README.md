@@ -88,6 +88,12 @@ CLI: `--variants body,title-breakout,attr-breakout,script-breakout,url-scheme`
 or `--variants all`. Each variant runs its own submit + verdict pass with
 its own cid, so multiple can report on the same target without collision.
 
+`--variants` and `--waf-bypass` are honoured in **both stored mode and
+reflected mode** — reflected mode's `crawl()` threads them through to every
+`probe_form` / `probe_link` call, and `probe_headers` also fans out per
+header × per variant. Reflected-mode dedup key now includes the variant, so
+a body + title-breakout reflection on the same param stays as two rows.
+
 **Variant-aware severity.** The v3.5 context detector labels where the *cid*
 landed. For a `-breakout` variant whose marker survives raw, the marker has
 already escaped that surrounding context — the class is executable. `_apply_ct_gate`
