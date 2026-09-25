@@ -96,10 +96,22 @@ now upgrades HIGH `unencoded` + `-breakout` variant + HTML response →
 `script`. JSON responses still downgrade to `json-only` (the browser doesn't
 parse them as HTML — no upgrade path).
 
-**WAF-bypass mutation helper** (`_waf_mutations`) also lives in the module:
-case-swap (`<DxSs>`), split-tag via HTML comment (`<d<!---->XsS>`), extra
-whitespace, URL-encoded angle brackets. Not wired into the CLI probes yet —
-it's a library primitive for future rounds.
+**`--waf-bypass`** (v3.10 wire): for each `--variants` entry, also fan out
+into 4 mutation shapes that keep the same `cid` prefix but obfuscate the
+markup a regex WAF may anchor on:
+
+```
+case        <dXsS> -> <DxSs>              (case-swap)
+split-cmt   <dXsS> -> <d<!---->XsS>       (HTML comment splits the tag)
+whitespace  <dXsS> -> <dXsS  >            (trailing space in tag)
+url-encode  <dXsS> -> %3CdXsS%3E          (URL-encoded angle brackets)
+```
+
+Each mutation has its own cid + marker so verdicts are independent — you can
+tell which mutation slipped through a filter that blocked the base. Total
+probe shape count is `len(--variants) × (1 + 4 if --waf-bypass else 1)`, so
+`--variants all --waf-bypass` is 25 submits per stored round; use it when
+you actually suspect filtering, not by default.
 
 ## Usage
 

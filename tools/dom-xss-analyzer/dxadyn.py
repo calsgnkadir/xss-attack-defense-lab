@@ -79,22 +79,23 @@ PAYLOAD_VARIANTS = {
 }
 
 
-# WAF-bypass mutations of the body payload. Each is applied ON TOP OF the
-# base variant, producing an alternate canary shape that shares the same
-# `cid` and same `marker` semantics. The idea: if the base is blocked by a
-# regex WAF, one of these variants may still slip through.
+# WAF-bypass mutations. Each takes the base variant's canary + marker and
+# returns an alternate shape that keeps the same `cid` prefix. The idea: if
+# the base payload is blocked by a regex WAF (rules that match <dXsS> or
+# <script literal etc.), one of these variants may still slip through by
+# obfuscating the parts the WAF pattern anchored on.
+_WAF_MUTATIONS = [
+    # (name, marker_transform) -- both sides get the same replacement
+    ("case",       lambda s: s.replace('<dXsS>', '<DxSs>')),
+    ("split-cmt",  lambda s: s.replace('<dXsS>', '<d<!---->XsS>')),   # comment splits the tag; parser re-forms
+    ("whitespace", lambda s: s.replace('<dXsS>', '<dXsS  >')),
+    ("url-encode", lambda s: s.replace('<dXsS>', '%3CdXsS%3E')),
+]
+
+
 def _waf_mutations(base_canary, marker):
-    """Return list of (canary_str, marker_str) alternates."""
-    return [
-        # case variant of the tag
-        (base_canary.replace('<dXsS>', '<DxSs>'), '<DxSs>'),
-        # split-tag insertion via HTML comment (parsed away, tag re-forms)
-        (base_canary.replace('<dXsS>', '<d<!---->XsS>'), '<dXsS>'),
-        # extra whitespace
-        (base_canary.replace('<dXsS>', '<dXsS  >'), '<dXsS  >'),
-        # URL-encoded angle brackets (in case app decodes)
-        (base_canary.replace('<dXsS>', '%3CdXsS%3E'), '%3CdXsS%3E'),
-    ]
+    """Return list of (mutation_name, canary_str, marker_str) alternates."""
+    return [(name, xf(base_canary), xf(marker)) for name, xf in _WAF_MUTATIONS]
 
 
 def make_canary(variant="body"):
@@ -107,14 +108,28 @@ def make_canary(variant="body"):
     return cid, cid + suffix
 
 
-def make_canaries_for(variants):
+def make_canaries_for(variants, waf_bypass=False):
     """Yield (variant_name, cid, canary, marker) for each variant. The whole
     v3.10 probe loop uses this to fan out one target-field into N attempts,
-    each with its own cid so verdict() can grade them separately."""
+    each with its own cid so verdict() can grade them separately.
+
+    If `waf_bypass=True`, after each base variant also yield mutated shapes
+    (case-swap, split-tag-comment, whitespace, URL-encode) with fresh cids.
+    Mutation variant names are `<variant>/<mut>` (e.g. `body/case`,
+    `title-breakout/split-cmt`). Every mutation has its own cid so verdicts
+    stay independent."""
     for v in variants:
         suffix, marker = PAYLOAD_VARIANTS.get(v, PAYLOAD_VARIANTS["body"])
         cid = "dxa" + secrets.token_hex(4)
-        yield v, cid, cid + suffix, marker
+        base_canary = cid + suffix
+        yield v, cid, base_canary, marker
+        if not waf_bypass:
+            continue
+        for mut_name, mut_canary, mut_marker in _waf_mutations(base_canary, marker):
+            # give each mutation its own cid so its verdict is independent
+            mut_cid = "dxa" + secrets.token_hex(4)
+            yield (f"{v}/{mut_name}", mut_cid,
+                   mut_canary.replace(cid, mut_cid, 1), mut_marker)
 
 
 def _opener():
@@ -533,17 +548,20 @@ def _do_submit(target_url, target_field, extra_fields, canary,
 def probe_stored(target_url, target_field, extra_fields, check_urls,
                  method="post", csrf_field="tokenCSRF",
                  json_body=None, header_target=None,
-                 variants=None):
+                 variants=None, waf_bypass=False):
     """Submit payloads, look for each on the check URL(s). Shape of the
     submission is form / json / header (see probe_stored_auto). `variants` is
     a list of payload-variant names to fan out through - each gets its own
-    cid, submit, and check pass. Default `['body']` = historical behaviour."""
+    cid, submit, and check pass. If `waf_bypass` is set, every variant also
+    generates its 4 mutation shapes (case-swap / split-tag-comment /
+    whitespace / URL-encode). Default `['body']`, `waf_bypass=False` =
+    historical single-shape behaviour."""
     variants = variants or ["body"]
     label = (f"header:{header_target}" if header_target else
              ("json" if json_body is not None else target_field))
     out = []
     cids = []
-    for vname, cid, canary, marker in make_canaries_for(variants):
+    for vname, cid, canary, marker in make_canaries_for(variants, waf_bypass):
         cids.append(cid)
         sub_status, _ = _do_submit(target_url, target_field, extra_fields, canary,
                                    method=method, csrf_field=csrf_field,
@@ -673,11 +691,13 @@ def _submit_header(target_url, header_name, canary, method="GET"):
 
 def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
                       method="post", csrf_field="tokenCSRF", max_links=60,
-                      json_body=None, header_target=None, variants=None):
+                      json_body=None, header_target=None, variants=None,
+                      waf_bypass=False):
     """Submit payload(s) then autonomously hunt for the canary via 1-hop crawl.
     v3.10: `variants` fans out into per-variant submits; each variant produces
-    its own findings (own cid + own marker). Candidate URLs are crawled once
-    and every candidate is verdicted against every variant's cid - one HTTP
+    its own findings (own cid + own marker). `waf_bypass` also fans each
+    variant into 4 mutation shapes. Candidate URLs are crawled once and
+    every candidate is verdicted against every submitted cid - one HTTP
     fetch per candidate, N verdicts, cheap."""
     variants = variants or ["body"]
     label = (f"header:{header_target}" if header_target else
@@ -686,7 +706,7 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
     # Phase 1: submit each variant, remember (vname, cid, marker, sub_status)
     submits = []
     landing = ""
-    for vname, cid, canary, marker in make_canaries_for(variants):
+    for vname, cid, canary, marker in make_canaries_for(variants, waf_bypass):
         sub_status, this_landing = _do_submit(
             target_url, target_field, extra_fields, canary,
             method=method, csrf_field=csrf_field,
@@ -948,6 +968,13 @@ def main():
                          "reflections that only execute after a </title> or "
                          "attribute-quote break, which the plain body payload "
                          "would only score as 'breakout-req'.")
+    ap.add_argument("--waf-bypass", action="store_true",
+                    help="stored mode: for each --variants entry, also probe "
+                         "4 mutation shapes (case-swap, split-tag via HTML "
+                         "comment, extra whitespace, URL-encoded angle "
+                         "brackets). Each mutation has its own cid + verdict. "
+                         "Useful when the base payload is blocked by a regex "
+                         "WAF that anchors on `<dXsS>` literally.")
 
     ap.add_argument("--login", help="log in at this URL before probing (session persists)")
     ap.add_argument("--user", help="username for --login")
@@ -1021,6 +1048,10 @@ def main():
                       f"{list(PAYLOAD_VARIANTS.keys())} or 'all'", file=sys.stderr)
                 sys.exit(2)
         vlabel = "" if variants == ["body"] else f" variants=[{','.join(variants)}]"
+        if args.waf_bypass:
+            vlabel += " +waf-bypass(x4/variant)"
+        # total shapes = variants * (1 + 4 mutations if waf_bypass else 1)
+        total_shapes = len(variants) * (5 if args.waf_bypass else 1)
 
         if args.auto_check:
             seeds = [u.strip() for u in args.auto_check_from.split(",") if u.strip()]
@@ -1033,8 +1064,8 @@ def main():
                 max_links=args.auto_check_max,
                 json_body=args.json_body or None,
                 header_target=args.header_target or None,
-                variants=variants)
-            print(f"[dxadyn] canary id = {cid}{' (of ' + str(len(variants)) + ' variants)' if len(variants) > 1 else ''}")
+                variants=variants, waf_bypass=args.waf_bypass)
+            print(f"[dxadyn] canary id = {cid}{' (of ' + str(total_shapes) + ' shapes)' if total_shapes > 1 else ''}")
             print(f"[dxadyn] submit landed at: {meta['submit_landing']}")
             print(f"[dxadyn] crawled {meta['checked_pages']}/{meta['candidates']} pages")
         else:
@@ -1047,8 +1078,9 @@ def main():
                                          csrf_field=args.csrf_field or "",
                                          json_body=args.json_body or None,
                                          header_target=args.header_target or None,
-                                         variants=variants)
-            print(f"[dxadyn] canary id = {cid}{' (of ' + str(len(variants)) + ' variants)' if len(variants) > 1 else ''}")
+                                         variants=variants,
+                                         waf_bypass=args.waf_bypass)
+            print(f"[dxadyn] canary id = {cid}{' (of ' + str(total_shapes) + ' shapes)' if total_shapes > 1 else ''}")
 
         if args.html:
             mode = "stored-auto" if args.auto_check else "stored"
