@@ -496,6 +496,115 @@ def test_dedupe_leaves_singletons_alone():
     assert out == findings                        # unchanged
 
 
+# --- v3.10: payload variants ------------------------------------------------
+
+def test_payload_variants_registered():
+    """The variant library must include the five documented shapes."""
+    assert set(dxadyn.PAYLOAD_VARIANTS) >= {
+        "body", "title-breakout", "attr-breakout",
+        "script-breakout", "url-scheme",
+    }
+
+
+def test_make_canary_variant_default_matches_historical():
+    """Backwards compat: make_canary() with no arg = old body shape."""
+    cid, canary = dxadyn.make_canary()
+    assert canary == cid + '"<dXsS>'
+
+
+def test_make_canary_variant_title_breakout():
+    cid, canary = dxadyn.make_canary("title-breakout")
+    assert canary == cid + '</title><dXsS>'
+
+
+def test_make_canary_variant_attr_breakout():
+    cid, canary = dxadyn.make_canary("attr-breakout")
+    assert canary == cid + '"><dXsS>'
+
+
+def test_make_canaries_for_yields_per_variant():
+    out = list(dxadyn.make_canaries_for(["body", "title-breakout"]))
+    assert len(out) == 2
+    assert out[0][0] == "body" and out[1][0] == "title-breakout"
+    # Each variant has its own cid (different random hex)
+    assert out[0][1] != out[1][1]
+    # And its own marker
+    assert out[0][3] == '<dXsS>'
+    assert out[1][3] == '</title><dXsS>'
+
+
+def test_verdict_marker_parameter_body_default():
+    body = '<div>xxx dxaAAAA"<dXsS> yyy</div>'
+    assert dxadyn.verdict("dxaAAAA", body) == "unencoded"
+
+
+def test_verdict_marker_parameter_title_variant():
+    """title-breakout variant's marker is </title><dXsS>; the plain <dXsS>
+    marker (default) wouldn't fire alone if only the breakout survived."""
+    body = '<title>results dxaAAAA</title><dXsS></title><rest>'
+    # with default marker (<dXsS>): unencoded (marker present after cid)
+    assert dxadyn.verdict("dxaAAAA", body) == "unencoded"
+    # with the title-breakout marker: still unencoded (full string survives)
+    assert dxadyn.verdict("dxaAAAA", body, marker='</title><dXsS>') == "unencoded"
+
+
+def test_verdict_marker_absent_when_only_partial_survives():
+    body = '<title>results dxaAAAA&lt;/title&gt;&lt;dXsS&gt;</title>'
+    # variant marker </title><dXsS> is HTML-escaped -> not raw
+    assert dxadyn.verdict("dxaAAAA", body, marker='</title><dXsS>') == "encoded"
+
+
+def test_ct_gate_breakout_variant_upgrades_to_executable():
+    """v3.10 semantic: a -breakout variant that survived raw in an HTML
+    response is treated as executable even if the CID landed inside title/
+    attr/script - the breakout marker escaped the surrounding context."""
+    ctx, sev = dxadyn._apply_ct_gate("unencoded", "title", "text/html",
+                                     variant="title-breakout")
+    assert ctx == "title" and sev == "executable"
+    ctx, sev = dxadyn._apply_ct_gate("unencoded", "attr:value", "text/html",
+                                     variant="attr-breakout")
+    assert sev == "executable"
+
+
+def test_ct_gate_breakout_variant_does_not_bypass_json_downgrade():
+    """The JSON downgrade still wins - a breakout variant on JSON response
+    doesn't execute in the browser either."""
+    ctx, sev = dxadyn._apply_ct_gate("unencoded", "body", "application/json",
+                                     variant="title-breakout")
+    assert sev == "json-only"
+
+
+def test_ct_gate_plain_body_variant_unchanged():
+    ctx, sev = dxadyn._apply_ct_gate("unencoded", "title", "text/html",
+                                     variant="body")
+    # body variant + title context = still breakout-req (no marker escape claim)
+    assert sev == "breakout-req"
+
+
+def test_probe_stored_multi_variant_produces_findings_per_variant():
+    """When two variants both reflect raw, we get one finding per variant
+    (not deduped - different cids)."""
+    _V34_DB["json"] = None
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _V34App)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # _V34App stores json body and reflects raw on /viewj
+        # Both body and attr-breakout variants should be flagged
+        findings, cid = dxadyn.probe_stored(
+            f"http://127.0.0.1:{port}/api/tags", target_field="",
+            extra_fields={}, check_urls=[f"http://127.0.0.1:{port}/viewj"],
+            json_body='{"tags":"{CANARY}"}', csrf_field="",
+            variants=["body", "attr-breakout"])
+    finally:
+        srv.shutdown()
+    variants_seen = {f["variant"] for f in findings}
+    assert "body" in variants_seen
+    assert "attr-breakout" in variants_seen
+
+
 # --- HTML report ------------------------------------------------------------
 
 def test_render_html_empty_produces_valid_page():

@@ -64,10 +64,57 @@ MARKUP = '<dXsS>'          # the tag that must survive raw to count as unencoded
 ATTR_MARK = '"'           # a bare double-quote surviving raw = attribute breakout
 
 
-def make_canary():
-    """A fresh, greppable, collision-free marker per injection."""
+# v3.10: payload variants for context-aware probing.
+# Each variant is (suffix_appended_to_cid, marker_that_must_survive_raw).
+# `suffix` is what gets sent; `marker` is what verdict() looks for AFTER cid.
+# The historical default `body` is the same shape as make_canary() was: an
+# attribute-quote followed by a benign tag. The others are payloads tuned to
+# a specific reflection context that the v3.5 sink-context detector labels.
+PAYLOAD_VARIANTS = {
+    "body":            ('"<dXsS>',                '<dXsS>'),
+    "title-breakout":  ('</title><dXsS>',         '</title><dXsS>'),
+    "attr-breakout":   ('"><dXsS>',               '"><dXsS>'),
+    "script-breakout": ("';<dXsS>//",             '<dXsS>'),
+    "url-scheme":      ('javascript:/*<dXsS>*/',  'javascript:/*<dXsS>*/'),
+}
+
+
+# WAF-bypass mutations of the body payload. Each is applied ON TOP OF the
+# base variant, producing an alternate canary shape that shares the same
+# `cid` and same `marker` semantics. The idea: if the base is blocked by a
+# regex WAF, one of these variants may still slip through.
+def _waf_mutations(base_canary, marker):
+    """Return list of (canary_str, marker_str) alternates."""
+    return [
+        # case variant of the tag
+        (base_canary.replace('<dXsS>', '<DxSs>'), '<DxSs>'),
+        # split-tag insertion via HTML comment (parsed away, tag re-forms)
+        (base_canary.replace('<dXsS>', '<d<!---->XsS>'), '<dXsS>'),
+        # extra whitespace
+        (base_canary.replace('<dXsS>', '<dXsS  >'), '<dXsS  >'),
+        # URL-encoded angle brackets (in case app decodes)
+        (base_canary.replace('<dXsS>', '%3CdXsS%3E'), '%3CdXsS%3E'),
+    ]
+
+
+def make_canary(variant="body"):
+    """A fresh, greppable, collision-free marker per injection.
+    Backwards-compatible: `make_canary()` returns the historical body-context
+    canary. Pass a variant name to get a context-tuned payload for v3.10
+    context-aware probing."""
     cid = "dxa" + secrets.token_hex(4)
-    return cid, cid + ATTR_MARK + MARKUP     # e.g. dxa1a2b3c4d"<dXsS>
+    suffix, _marker = PAYLOAD_VARIANTS.get(variant, PAYLOAD_VARIANTS["body"])
+    return cid, cid + suffix
+
+
+def make_canaries_for(variants):
+    """Yield (variant_name, cid, canary, marker) for each variant. The whole
+    v3.10 probe loop uses this to fan out one target-field into N attempts,
+    each with its own cid so verdict() can grade them separately."""
+    for v in variants:
+        suffix, marker = PAYLOAD_VARIANTS.get(v, PAYLOAD_VARIANTS["body"])
+        cid = "dxa" + secrets.token_hex(4)
+        yield v, cid, cid + suffix, marker
 
 
 def _opener():
@@ -225,24 +272,27 @@ def _is_html_response(content_type):
     return False
 
 
-def _apply_ct_gate(reflection, context, content_type):
-    """v3.7: if the response is JSON (or non-HTML text), a body-context raw
-    reflection is NOT a browser-parsed HTML injection - it's an API echo that
-    the front-end still has to escape or `dangerouslySetInnerHTML` for XSS to
-    fire. Downgrade the severity so JSON-API false positives (the exact class
-    hotel-platform surfaced on the PUT /api/candidate/profile probe) don't
-    crowd out real findings.
-    Returns the possibly-adjusted (context, severity)."""
+def _apply_ct_gate(reflection, context, content_type, variant="body"):
+    """v3.7 + v3.10: Content-Type gate + variant-aware severity.
+
+    HTML response:
+      - v3.10: if `variant` is a `-breakout` (title/attr/script) and the
+        reflection is `unencoded`, the breakout payload PROVED the escape:
+        the marker survived AFTER the closing token, so it's effectively in
+        body context now. Severity = executable regardless of `context`
+        (which reflects where the cid landed, not the marker).
+      - Otherwise, fall through to the plain (reflection, context) severity.
+    Non-HTML response (JSON/text): reflection is real cross-boundary but the
+    browser will not parse it as HTML - severity downgrades to `json-only`.
+    """
     if _is_html_response(content_type):
+        if reflection == "unencoded" and variant.endswith("-breakout"):
+            return context, "executable"
         return context, _severity(reflection, context)
-    # non-HTML response: the raw markup still crossed the trust boundary
-    # (it IS a stored/reflected value the app returns unescaped), but it
-    # will not execute in the browser without a downstream client-side sink.
-    # Keep the finding, tag context as `json-body`, severity `json-only`.
     if reflection == "unencoded":
         return "json-body", "json-only"
     if reflection == "attr-only":
-        return "json-body", "-"                              # not meaningful in JSON
+        return "json-body", "-"
     return context, "-"
 
 
@@ -266,31 +316,31 @@ def dedupe_findings(findings):
     return out
 
 
-def verdict(cid, body):
+def verdict(cid, body, marker=MARKUP):
     """Classify how the canary came back. The check inspects the char(s)
     IMMEDIATELY after each cid occurrence - a gap between cid and the follow-on
     means the id landed inside a slug/URL/attribute VALUE by coincidence, not
-    the raw canary payload itself. This kept auto-check from false-positiving
-    on `<a href="/tag/<cid>-dxss">` links that scanner crawls surface.
-      unencoded : cid is followed by the raw <dXsS> tag (quote may be encoded)
-      attr-only : cid is followed IMMEDIATELY by a raw quote, tag didn't survive
+    the raw canary payload itself.
+      unencoded : cid is followed by the raw `marker` (quote may be encoded)
+      attr-only : cid is followed IMMEDIATELY by a raw quote (marker didn't survive)
       encoded   : cid is present but neither of the above
       absent    : cid not in body
-    """
+    v3.10: `marker` defaults to MARKUP (`<dXsS>`) so single-variant callers
+    are unaffected; variant-aware callers pass the marker for that variant."""
     if cid not in body:
         return "absent"
     weak = None
-    span = len(MARKUP) + 8                                    # room past &quot;
+    span = len(marker) + 8                                    # room past &quot;
     i = 0
     while True:
         j = body.find(cid, i)
         if j == -1:
             break
-        after = body[j + len(cid): j + len(cid) + 40]
-        # strongest signal: markup survives raw right after cid (quote or not)
-        if after.startswith(ATTR_MARK + MARKUP):
+        after = body[j + len(cid): j + len(cid) + max(60, len(marker) + 20)]
+        # strongest signal: marker survives raw right after cid
+        if after.startswith(ATTR_MARK + marker) or after.startswith(marker):
             return "unencoded"
-        if MARKUP in after[:span]:                            # markup within a few chars
+        if marker in after[:span]:                            # marker within a few chars
             return "unencoded"
         # medium: char right after cid is a raw, unescaped quote
         if after.startswith(ATTR_MARK):
@@ -482,34 +532,37 @@ def _do_submit(target_url, target_field, extra_fields, canary,
 
 def probe_stored(target_url, target_field, extra_fields, check_urls,
                  method="post", csrf_field="tokenCSRF",
-                 json_body=None, header_target=None):
-    """Submit ONE payload with a canary, then look for the canary on each URL
-    in `check_urls`. Shape of the submission:
-      form  (default)     - `target_field` in a POST/GET form body
-      json  (json_body)   - `{CANARY}` in a JSON template posted to target_url
-      header (header_target) - canary in the named request header
-    A check URL may contain the literal token `{CID}` - the canary id is
-    substituted in (useful for slug-derived pages)."""
-    cid, canary = make_canary()
-    sub_status, _ = _do_submit(target_url, target_field, extra_fields, canary,
-                               method=method, csrf_field=csrf_field,
-                               json_body=json_body, header_target=header_target)
-
+                 json_body=None, header_target=None,
+                 variants=None):
+    """Submit payloads, look for each on the check URL(s). Shape of the
+    submission is form / json / header (see probe_stored_auto). `variants` is
+    a list of payload-variant names to fan out through - each gets its own
+    cid, submit, and check pass. Default `['body']` = historical behaviour."""
+    variants = variants or ["body"]
     label = (f"header:{header_target}" if header_target else
              ("json" if json_body is not None else target_field))
     out = []
-    for raw_url in check_urls:
-        url = raw_url.replace("{CID}", cid)
-        st, _, body, _ct = fetch(url)
-        v = verdict(cid, body or "")
-        if v in ("unencoded", "attr-only"):
-            raw_ctx = find_context(cid, body or "")
-            ctx, sev = _apply_ct_gate(v, raw_ctx, _ct)
-            out.append({"target": target_url, "field": label, "check_url": url,
-                        "reflection": v, "confidence": "high" if v == "unencoded" else "medium",
-                        "sub_status": sub_status, "check_status": st, "canary_id": cid,
-                        "context": ctx, "severity": sev, "content_type": _ct})
-    return out, cid
+    cids = []
+    for vname, cid, canary, marker in make_canaries_for(variants):
+        cids.append(cid)
+        sub_status, _ = _do_submit(target_url, target_field, extra_fields, canary,
+                                   method=method, csrf_field=csrf_field,
+                                   json_body=json_body, header_target=header_target)
+        for raw_url in check_urls:
+            url = raw_url.replace("{CID}", cid)
+            st, _, body, _ct = fetch(url)
+            v = verdict(cid, body or "", marker)
+            if v in ("unencoded", "attr-only"):
+                raw_ctx = find_context(cid, body or "")
+                ctx, sev = _apply_ct_gate(v, raw_ctx, _ct, vname)
+                out.append({"target": target_url, "field": label, "check_url": url,
+                            "reflection": v, "confidence": "high" if v == "unencoded" else "medium",
+                            "sub_status": sub_status, "check_status": st, "canary_id": cid,
+                            "context": ctx, "severity": sev, "content_type": _ct,
+                            "variant": vname})
+    # Return first cid for backward-compat single-variant callers; the full list
+    # is on findings[i].canary_id for multi-variant callers.
+    return out, cids[0] if cids else ""
 
 
 # --- v3.2: auto-discover check URLs (crawl after submit) --------------------
@@ -620,19 +673,35 @@ def _submit_header(target_url, header_name, canary, method="GET"):
 
 def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
                       method="post", csrf_field="tokenCSRF", max_links=60,
-                      json_body=None, header_target=None):
-    """Submit ONE payload with a canary (form / json / header), then
-    autonomously hunt for the canary on same-host pages one hop from the seeds.
-    See probe_stored for the shape selection; this adds auto-discovery on top."""
-    cid, canary = make_canary()
-    sub_status, landing = _do_submit(target_url, target_field, extra_fields,
-                                     canary, method=method, csrf_field=csrf_field,
-                                     json_body=json_body, header_target=header_target)
+                      json_body=None, header_target=None, variants=None):
+    """Submit payload(s) then autonomously hunt for the canary via 1-hop crawl.
+    v3.10: `variants` fans out into per-variant submits; each variant produces
+    its own findings (own cid + own marker). Candidate URLs are crawled once
+    and every candidate is verdicted against every variant's cid - one HTTP
+    fetch per candidate, N verdicts, cheap."""
+    variants = variants or ["body"]
+    label = (f"header:{header_target}" if header_target else
+             ("json" if json_body is not None else target_field))
 
-    # seed set: user-supplied (with {CID} substitution) + submit landing + target origin's `/`
+    # Phase 1: submit each variant, remember (vname, cid, marker, sub_status)
+    submits = []
+    landing = ""
+    for vname, cid, canary, marker in make_canaries_for(variants):
+        sub_status, this_landing = _do_submit(
+            target_url, target_field, extra_fields, canary,
+            method=method, csrf_field=csrf_field,
+            json_body=json_body, header_target=header_target)
+        submits.append((vname, cid, marker, sub_status))
+        landing = landing or this_landing
+    first_cid = submits[0][1] if submits else ""
+
+    # Phase 2: assemble crawl seeds. {CID} in user seeds is replaced with the
+    # FIRST variant's cid (single-variant back-compat); other variants share
+    # the crawl surface. If N variants have different slugs, extra seed
+    # templates can be passed with the pattern replicated - future refinement.
     origin = urllib.parse.urlsplit(target_url)
     root = f"{origin.scheme}://{origin.netloc}/"
-    resolved_seeds = [u.replace("{CID}", cid) for u in (seed_urls or [])]
+    resolved_seeds = [u.replace("{CID}", first_cid) for u in (seed_urls or [])]
     seeds, seen_seeds = [], set()
     for u in resolved_seeds + ([landing] if landing else []) + [root]:
         if u and u not in seen_seeds:
@@ -642,7 +711,6 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
     host = origin.netloc
     candidates, seen = [], set()
     for seed in seeds:
-        # the seed itself is a candidate (maybe the canary shows up there directly)
         if seed not in seen:
             seen.add(seed)
             candidates.append(seed)
@@ -661,29 +729,31 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
         if len(candidates) >= max_links:
             break
 
-    label = (f"header:{header_target}" if header_target else
-             ("json" if json_body is not None else target_field))
+    # Phase 3: fetch each candidate once, verdict against every variant
     findings, checked = [], 0
     for url in candidates:
         st, _, body, _ct = fetch(url)
         checked += 1
-        if not body or cid not in body:
+        if not body:
             continue
-        v = verdict(cid, body)
-        if v in ("unencoded", "attr-only"):
-            raw_ctx = find_context(cid, body or "")
-            ctx, sev = _apply_ct_gate(v, raw_ctx, _ct)
-            findings.append({"target": target_url, "field": label,
-                             "check_url": url, "reflection": v,
-                             "confidence": "high" if v == "unencoded" else "medium",
-                             "sub_status": sub_status, "check_status": st,
-                             "canary_id": cid, "auto_discovered": True,
-                             "context": ctx, "severity": sev, "content_type": _ct})
+        for vname, cid, marker, sub_status in submits:
+            if cid not in body:
+                continue
+            v = verdict(cid, body, marker)
+            if v in ("unencoded", "attr-only"):
+                raw_ctx = find_context(cid, body or "")
+                ctx, sev = _apply_ct_gate(v, raw_ctx, _ct, vname)
+                findings.append({"target": target_url, "field": label,
+                                 "check_url": url, "reflection": v,
+                                 "confidence": "high" if v == "unencoded" else "medium",
+                                 "sub_status": sub_status, "check_status": st,
+                                 "canary_id": cid, "auto_discovered": True,
+                                 "context": ctx, "severity": sev, "content_type": _ct,
+                                 "variant": vname})
 
-    # dedupe: same canary + reflection + context on many pages = one bug
     findings = dedupe_findings(findings)
-    return findings, cid, {"submit_landing": landing, "checked_pages": checked,
-                           "candidates": len(candidates)}
+    return findings, first_cid, {"submit_landing": landing, "checked_pages": checked,
+                                 "candidates": len(candidates)}
 
 
 def probe_headers(url, header_names):
@@ -869,6 +939,15 @@ def main():
                          "the stored header-XSS class (Bludit Finding #8 shape).")
     ap.add_argument("--csrf-field", default="tokenCSRF",
                     help="hidden CSRF field name (default tokenCSRF); empty to disable")
+    ap.add_argument("--variants", default="body",
+                    help="stored mode: comma-separated payload variants to try; "
+                         "each variant gets its own cid + probe. Choices: "
+                         "body (default), title-breakout, attr-breakout, "
+                         "script-breakout, url-scheme, or `all`. Example: "
+                         "--variants title-breakout,attr-breakout picks up "
+                         "reflections that only execute after a </title> or "
+                         "attribute-quote break, which the plain body payload "
+                         "would only score as 'breakout-req'.")
 
     ap.add_argument("--login", help="log in at this URL before probing (session persists)")
     ap.add_argument("--user", help="username for --login")
@@ -930,9 +1009,22 @@ def main():
                       ("json body" if args.json_body else
                        f"header='{args.header_target}'"))
 
+        # v3.10: resolve --variants (comma-list, or "all"); default = body
+        vraw = (args.variants or "body").strip().lower()
+        if vraw == "all":
+            variants = list(PAYLOAD_VARIANTS.keys())
+        else:
+            variants = [v.strip() for v in vraw.split(",") if v.strip()]
+            unknown = [v for v in variants if v not in PAYLOAD_VARIANTS]
+            if unknown:
+                print(f"[dxadyn] unknown --variants: {unknown}. Valid: "
+                      f"{list(PAYLOAD_VARIANTS.keys())} or 'all'", file=sys.stderr)
+                sys.exit(2)
+        vlabel = "" if variants == ["body"] else f" variants=[{','.join(variants)}]"
+
         if args.auto_check:
             seeds = [u.strip() for u in args.auto_check_from.split(",") if u.strip()]
-            print(f"[dxadyn] STORED-AUTO probe: {args.target} {shape_desc} "
+            print(f"[dxadyn] STORED-AUTO probe: {args.target} {shape_desc}{vlabel} "
                   f"-> autonomous crawl (seeds={len(seeds)+2}, max={args.auto_check_max}) "
                   f"- authorized/local only\n")
             findings, cid, meta = probe_stored_auto(
@@ -940,21 +1032,23 @@ def main():
                 seeds, method=args.method, csrf_field=args.csrf_field or "",
                 max_links=args.auto_check_max,
                 json_body=args.json_body or None,
-                header_target=args.header_target or None)
-            print(f"[dxadyn] canary id = {cid}")
+                header_target=args.header_target or None,
+                variants=variants)
+            print(f"[dxadyn] canary id = {cid}{' (of ' + str(len(variants)) + ' variants)' if len(variants) > 1 else ''}")
             print(f"[dxadyn] submit landed at: {meta['submit_landing']}")
             print(f"[dxadyn] crawled {meta['checked_pages']}/{meta['candidates']} pages")
         else:
             checks = [u.strip() for u in args.check.split(",") if u.strip()]
-            print(f"[dxadyn] STORED probe: {args.target} {shape_desc} "
+            print(f"[dxadyn] STORED probe: {args.target} {shape_desc}{vlabel} "
                   f"-> checking {len(checks)} URL(s) - authorized/local only\n")
             findings, cid = probe_stored(args.target, args.target_field,
                                          _parse_kv_list(args.extra), checks,
                                          method=args.method,
                                          csrf_field=args.csrf_field or "",
                                          json_body=args.json_body or None,
-                                         header_target=args.header_target or None)
-            print(f"[dxadyn] canary id = {cid}")
+                                         header_target=args.header_target or None,
+                                         variants=variants)
+            print(f"[dxadyn] canary id = {cid}{' (of ' + str(len(variants)) + ' variants)' if len(variants) > 1 else ''}")
 
         if args.html:
             mode = "stored-auto" if args.auto_check else "stored"
@@ -975,9 +1069,11 @@ def main():
             mode = " [auto]" if f.get("auto_discovered") else ""
             ctx = f.get("context", "?")
             sev = f.get("severity", "-")
+            variant = f.get("variant", "body")
+            vtag = f" variant={variant}" if variant != "body" else ""
             dup = len(f.get("duplicates", []))
             dup_s = f"  (+{dup} more URLs, same bug)" if dup else ""
-            print(f"{f['check_url']}  [{sev.upper()}] context={ctx}{mode}  "
+            print(f"{f['check_url']}  [{sev.upper()}] context={ctx}{vtag}{mode}  "
                   f"stored via {f['target']} field '{f['field']}'  -> {tag}  "
                   f"(submit HTTP {f['sub_status']}, check HTTP {f['check_status']}){dup_s}")
         execs = sum(1 for f in findings if f.get("severity") == "executable")

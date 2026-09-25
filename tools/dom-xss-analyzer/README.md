@@ -70,6 +70,37 @@ offending line for every finding — both JavaScript (DOM XSS) and C#/.NET.*
    was the specific fix for the hotel-platform `CorrelationIdFilter` case where
    `String cid = ... ? sanitize(inbound) : shortUuid();` split across 3 lines.
 
+### v3.10 - payload variants + variant-aware severity (dxadyn)
+
+`dxadyn` used to send one canary shape (`cid"<dXsS>`) — body context only.
+v3.10 adds a variant library and lets `--stored` fan out through several
+context-tuned payloads in one command:
+
+```
+body            cid"<dXsS>              (default; body/free context)
+title-breakout  cid</title><dXsS>       (closes <title> then lands markup)
+attr-breakout   cid"><dXsS>             (closes an attribute quote + tag)
+script-breakout cid';<dXsS>//           (closes a JS string, // eats trailer)
+url-scheme      cidjavascript:/*<dXsS>*/(href/src that renders javascript:)
+```
+
+CLI: `--variants body,title-breakout,attr-breakout,script-breakout,url-scheme`
+or `--variants all`. Each variant runs its own submit + verdict pass with
+its own cid, so multiple can report on the same target without collision.
+
+**Variant-aware severity.** The v3.5 context detector labels where the *cid*
+landed. For a `-breakout` variant whose marker survives raw, the marker has
+already escaped that surrounding context — the class is executable. `_apply_ct_gate`
+now upgrades HIGH `unencoded` + `-breakout` variant + HTML response →
+`executable`, even if the underlying context reads as `title` / `attr` /
+`script`. JSON responses still downgrade to `json-only` (the browser doesn't
+parse them as HTML — no upgrade path).
+
+**WAF-bypass mutation helper** (`_waf_mutations`) also lives in the module:
+case-swap (`<DxSs>`), split-tag via HTML comment (`<d<!---->XsS>`), extra
+whitespace, URL-encoded angle brackets. Not wired into the CLI probes yet —
+it's a library primitive for future rounds.
+
 ## Usage
 
 ```bash
