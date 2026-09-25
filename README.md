@@ -2,12 +2,13 @@
 
 Hands-on web application security work built on four concrete outputs: **confirmed vulnerabilities**
 on OWASP Juice Shop, a **working XSS analysis bot** I wrote (`dxa` + `dxadyn` + `dxa2dyn`, 5-language
-static + 10-flag dynamic + bridge, 79 tests, CI), **independent research on real third-party
-open-source software** that produced externally-validated results (a Broken-Access-Control vulnerability
-confirmed by Patchstack + a SQL-injection variant re-derived via patch-diffing that was published as a
-CVE), and **eight mechanism-first writeups** explaining the reasoning behind each class. The scope
-spans the **OWASP Top 10** — XSS (reflected/stored/DOM/mutation), SQL Injection, JWT / broken
-authentication, access control (IDOR/BOLA), CSP bypass — each attack paired with its defense.
+static + 10-flag dynamic + bridge, 5 payload variants × 4 WAF-bypass mutations, 101 tests, CI),
+**independent research on real third-party open-source software** that produced externally-validated
+results (a Broken-Access-Control vulnerability confirmed by Patchstack + a SQL-injection variant
+re-derived via patch-diffing that was published as a CVE), and **ten mechanism-first writeups**
+explaining the reasoning behind each class. The scope spans the **OWASP Top 10** — XSS
+(reflected/stored/DOM/mutation), SQL Injection, JWT / broken authentication, access control
+(IDOR/BOLA), CSP bypass — each attack paired with its defense.
 
 > XSS is where this work goes deepest (its origin and the tool suite), but the same
 > **source → sink** discipline is applied across injection, authentication, and access-control bugs.
@@ -40,10 +41,13 @@ step, not just paste a payload. The tool suite makes that methodology *runnable*
   JS/TS + C#/.NET + PHP + Java + Python — with a 5-layer precision chain: sink patterns, source/taint,
   same-line escape squelch, cross-method sanitizer awareness, multi-line statement join, and sink-family
   dedup), the dynamic verifier `dxadyn` (10 CLI flags — reflected/stored/auto-check/JSON body/header
-  target/cookie or bearer session import/PUT-PATCH-DELETE/probe-headers/HTML report/Content-Type gate),
-  and the bridge `dxa2dyn` that feeds static HIGH hints into the dynamic probe. 79 pytest cases,
+  target/cookie or bearer session import/PUT-PATCH-DELETE/probe-headers/HTML report/Content-Type gate;
+  plus 5 payload variants — body / title-breakout / attr-breakout / script-breakout / url-scheme —
+  each with an opt-in 4-shape WAF-bypass mutation library, and a variant-aware severity upgrade so
+  a breakout marker that survived raw on HTML is scored `executable` not `breakout-req`), and the
+  bridge `dxa2dyn` that feeds static HIGH hints into the dynamic probe. **101 pytest cases**,
   CI-gated, zero third-party dependencies.
-- **Writeups** — eight mechanism-first technical explainers (01-08), each tied to a confirmed finding
+- **Writeups** — ten mechanism-first technical explainers (01-10), each tied to a confirmed finding
   or a documented tool milestone; see [`writeups/`](writeups/).
 
 ---
@@ -208,15 +212,18 @@ xss-attack-defense-lab/
 ├── tools/
 │   └── dom-xss-analyzer/
 │       ├── dxa.py               – static analyzer (5 lang, taint, 5-layer precision chain)
-│       ├── dxadyn.py            – dynamic verifier (reflected/stored/auto/JSON/header/PUT/PATCH…)
+│       ├── dxadyn.py            – dynamic verifier (reflected/stored/auto/JSON/header/PUT/PATCH…
+│       │                          + 5 payload variants + 4 WAF-bypass mutations + severity upgrade)
 │       ├── dxa2dyn.py           – static→dynamic bridge (dxa HIGH hints → dxadyn probe list)
 │       ├── examples/            – vulnerable + safe corpus per language (JS/CS/PHP/Java/Python)
-│       ├── test_dxa.py + test_dxadyn.py + test_dxa2dyn.py   – 79 pytest cases (CI)
+│       ├── test_dxa.py + test_dxadyn.py + test_dxa2dyn.py   – 101 pytest cases (CI)
 │       └── README.md            – tool docs + capability matrix
 ├── research/          – Beyond the Lab: independent real-world research + externally-validated results
-├── writeups/          – 8 mechanism-first explainers (01: filtering, 02: DOM XSS in a React SPA,
+├── writeups/          – 10 mechanism-first explainers (01: filtering, 02: DOM XSS in a React SPA,
 │                        03: SQLi, 04: JWT, 05: IDOR/BOLA, 06: building the bot, 07: teaching the
-│                        bot to log in and shut up, 08: what the bot doesn't shout about matters)
+│                        bot to log in and shut up, 08: what the bot doesn't shout about matters,
+│                        09: three HIGH to one — precision journey, 10: one shape was never enough —
+│                        payload variants + WAF bypass)
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
 └── defense/           – written secure-coding defenses for every confirmed class
 ```
