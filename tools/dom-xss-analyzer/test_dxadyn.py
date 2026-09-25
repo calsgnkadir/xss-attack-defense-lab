@@ -581,6 +581,150 @@ def test_ct_gate_plain_body_variant_unchanged():
     assert sev == "breakout-req"
 
 
+# --- v3.10 late: WAF-bypass mutations + reflected variants ------------------
+
+def test_waf_mutations_return_named_triples():
+    """_waf_mutations() must return (name, canary_str, marker_str) triples,
+    all four documented mutation shapes present."""
+    triples = dxadyn._waf_mutations('dxaAAAA"<dXsS>', '<dXsS>')
+    names = [t[0] for t in triples]
+    assert names == ["case", "split-cmt", "whitespace", "url-encode"]
+    # each mutation transforms both the canary and the marker
+    for name, canary, marker in triples:
+        assert marker != '<dXsS>', f"{name} marker must differ from base"
+        assert canary.startswith('dxaAAAA')
+
+
+def test_make_canaries_for_waf_bypass_multiplies_by_five():
+    """One base variant + 4 mutations = 5 canary tuples."""
+    out = list(dxadyn.make_canaries_for(["body"], waf_bypass=True))
+    assert len(out) == 5
+    # first is the base, others are named `body/<mutation>`
+    assert out[0][0] == "body"
+    assert {t[0] for t in out[1:]} == {"body/case", "body/split-cmt",
+                                        "body/whitespace", "body/url-encode"}
+    # every mutation has its OWN cid (not reused from base)
+    cids = {t[1] for t in out}
+    assert len(cids) == 5
+
+
+def test_make_canaries_for_waf_bypass_across_multiple_variants():
+    """N variants × 5 = N*5 canary tuples with waf_bypass=True."""
+    out = list(dxadyn.make_canaries_for(["body", "title-breakout"], waf_bypass=True))
+    assert len(out) == 10                          # 2 × 5
+    # both bases present
+    names = [t[0] for t in out]
+    assert "body" in names and "title-breakout" in names
+    # mutation names prefixed correctly
+    assert "title-breakout/case" in names
+    assert "body/split-cmt" in names
+
+
+def test_make_canaries_for_no_waf_bypass_stays_single_shape():
+    """Default (waf_bypass=False) still yields exactly one tuple per variant."""
+    out = list(dxadyn.make_canaries_for(["body", "attr-breakout"]))
+    assert len(out) == 2
+
+
+# --- probe_form / probe_link now accept variants + waf_bypass ---------------
+
+def test_probe_form_variants_kwarg_fan_out():
+    """probe_form runs each variant × each field: two variants + one field
+    with a raw-echoing form should produce two findings, one per variant."""
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _Reflector)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # /r form (see fixture at top of file) echoes q raw in body context
+        form = {"action": f"http://127.0.0.1:{port}/r", "method": "get",
+                "fields": {"q": ""}}
+        findings = dxadyn.probe_form(form, variants=["body", "attr-breakout"])
+    finally:
+        srv.shutdown()
+    variants_seen = {f["variant"] for f in findings}
+    assert "body" in variants_seen
+    assert "attr-breakout" in variants_seen
+
+
+def test_probe_link_variants_kwarg_fan_out():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _Reflector)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings = dxadyn.probe_link(f"http://127.0.0.1:{port}/r?q=x",
+                                     variants=["body", "attr-breakout"])
+    finally:
+        srv.shutdown()
+    variants_seen = {f["variant"] for f in findings}
+    assert "body" in variants_seen
+    assert "attr-breakout" in variants_seen
+
+
+def test_probe_headers_variants_kwarg_fan_out():
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _HeaderEcho)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings = dxadyn.probe_headers(
+            f"http://127.0.0.1:{port}/", ["X-Forwarded-For"],
+            variants=["body", "attr-breakout"])
+    finally:
+        srv.shutdown()
+    variants_seen = {f["variant"] for f in findings}
+    assert "body" in variants_seen
+    assert "attr-breakout" in variants_seen
+
+
+# --- crawl(): variant-aware dedup key ---------------------------------------
+
+def test_crawl_dedup_key_is_variant_aware():
+    """Two variants that both fire on the same param must NOT collapse into
+    one row after crawl()'s dedup step - the dedup key includes variant now."""
+    dxadyn.EXTRA_HEADERS.clear()
+    dxadyn.OPENER = dxadyn._opener()
+    srv = HTTPServer(("127.0.0.1", 0), _Reflector)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # crawl on the fixture index (has /r + /rs forms). Two variants on /r's q.
+        findings = dxadyn.crawl(f"http://127.0.0.1:{port}/", 1,
+                                variants=["body", "attr-breakout"])
+    finally:
+        srv.shutdown()
+    # collect findings on /r's q param
+    r_q = [f for f in findings if f["url"].endswith("/r") and f["param"] == "q"]
+    variants = {f["variant"] for f in r_q}
+    assert "body" in variants
+    assert "attr-breakout" in variants
+
+
+# --- _finding() picks up variant into severity via CT gate ------------------
+
+def test_finding_helper_variant_upgrades_severity_on_html():
+    """A title-breakout variant reflection on text/html gets severity=executable
+    via the CT gate variant-aware upgrade path."""
+    f = dxadyn._finding("http://x/", "GET", "q", "unencoded", 200,
+                        context="title", canary_id="dxaXX",
+                        content_type="text/html", variant="title-breakout")
+    assert f["severity"] == "executable"
+    assert f["variant"] == "title-breakout"
+
+
+def test_finding_helper_default_variant_stays_body_breakout_req():
+    """No variant kwarg -> defaults to 'body'; title context stays breakout-req."""
+    f = dxadyn._finding("http://x/", "GET", "q", "unencoded", 200,
+                        context="title", canary_id="dxaXX",
+                        content_type="text/html")
+    assert f["variant"] == "body"
+    assert f["severity"] == "breakout-req"
+
+
 def test_probe_stored_multi_variant_produces_findings_per_variant():
     """When two variants both reflect raw, we get one finding per variant
     (not deduped - different cids)."""
