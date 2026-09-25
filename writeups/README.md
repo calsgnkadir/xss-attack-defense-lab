@@ -17,6 +17,7 @@ assessment.
 | 07 | [Teaching the bot to log in, find its own targets, and shut up](07-teaching-the-bot-to-log-in.md) | Tooling / real-target maturity | v3.1-v3.4: session import, auto-crawl, JSON/header submit, PHP static, escape-aware squelch, HTML report |
 | 08 | [What the bot doesn't shout about is what makes it useful](08-what-does-not-shout-matters.md) | Tooling / precision > recall | v3.5-v3.7 + Java: sink-context, dedup, PUT/PATCH/DELETE, Content-Type gate, Java/Servlet/Spring static |
 | 09 | [Three HIGH to one: a precision journey on real code](09-three-high-to-one-a-precision-journey.md) | Tooling / engineered heuristic | v3.8 + v3.9 case study on hotel-platform (own project): cross-method sanitizer + multi-line join + sink-family dedup walk static HIGH count from 3 → 2 → 1 |
+| 10 | [One shape was never enough: payload variants and WAF bypass](10-one-shape-was-never-enough.md) | Tooling / recall + precision | v3.10: five context-tuned payload variants (body / title-breakout / attr-breakout / script-breakout / url-scheme), variant-aware severity upgrade, four WAF-bypass mutations per variant, same flags in reflected + stored + header-probe modes |
 
 > Every writeup here is backed by hands-on work on an **authorized** target:
 > OWASP Juice Shop (local Docker) or, for the field writeup (02), authorized
