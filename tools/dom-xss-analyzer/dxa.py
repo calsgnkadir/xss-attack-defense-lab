@@ -288,6 +288,25 @@ _SANITIZE_HINT = re.compile(
 SINK_SUPPRESSIONS = [
     ("src-href",       "navigation"),      # location.href/src writes -> navigation covers it
     ("response-write", "servlet-writer"),  # response.getWriter().*() also matches servlet-writer
+
+    # Phase 0.1 widening. Each pair below is (loser, winner): when both regexes
+    # match on the same line, drop the LOSER's finding. Verified against the
+    # regex sources - each pair has a real-world source shape that trips both.
+    ("innerHTML",         "angular-bypass"),      # elem.innerHTML = this.sanitizer.bypassSecurityTrustHtml(x)
+                                                  #   -> the bypass call is the actionable signal; the .innerHTML=
+                                                  #   assignment is just its target. Report once, as angular-bypass.
+    ("jsp-expr",          "jsp-el-unescape"),     # <c:out escapeXml="false"><%=request.getParameter("x")%></c:out>
+                                                  #   -> the c:out escapeXml="false" tells the operator WHY the JSP
+                                                  #   expression is dangerous. Keep the more informative one.
+    ("markupsafe-markup", "django-mark-safe"),    # mark_safe(Markup(user_input))
+                                                  #   -> the outer django-mark-safe is idiomatic-Django context;
+                                                  #   report as django-mark-safe, drop the inner Markup() noise.
+    ("th-utext",          "th-inline-unesc"),     # <span th:utext="${x}">[(${x})]</span> mixes both Thymeleaf
+                                                  #   unescape mechanisms on one node; the [( ... )] inline form
+                                                  #   is the less-known one worth surfacing.
+    ("jinja-safe-filter", "render-template-str"), # render_template_string("...{{ x | safe }}...")
+                                                  #   -> render_template_string on user data is the whole-class
+                                                  #   attack; the |safe filter inside is a symptom. Report the class.
 ]
 
 

@@ -187,6 +187,102 @@ def test_sink_suppression_table_intact():
     assert pairs.get("response-write") == "servlet-writer"
 
 
+# --- Phase 0.1: 5 new sink-suppression pairs (2026-09-26) -------------------
+
+def _scan_snippet(tmp_path, ext, code):
+    """Write `code` to a tmp file with `ext`, run dxa.scan_file, return
+    (findings, sinks_by_line). Used by the Phase 0.1 dedup tests below."""
+    p = tmp_path / f"snippet.{ext}"
+    p.write_text(code, encoding="utf-8")
+    findings = dxa.scan_file(str(p))
+    by_line = {}
+    for f in findings:
+        by_line.setdefault(f["line"], set()).add(f["sink"])
+    return findings, by_line
+
+
+def test_sink_dedup_angular_bypass_wins_over_innerhtml(tmp_path):
+    """Angular pattern .innerHTML = bypassSecurityTrustHtml(x) fires both
+    the innerHTML and angular-bypass sinks. Only angular-bypass should
+    survive (more informative)."""
+    code = ("const x = window.location.hash;\n"
+            "elem.innerHTML = this.sanitizer.bypassSecurityTrustHtml(x);\n")
+    _, by_line = _scan_snippet(tmp_path, "ts", code)
+    sinks_line2 = by_line.get(2, set())
+    assert "angular-bypass" in sinks_line2, sinks_line2
+    assert "innerHTML" not in sinks_line2, (
+        f"innerHTML should have been suppressed on line 2, got {sinks_line2}")
+
+
+def test_sink_dedup_jsp_el_unescape_wins_over_jsp_expr(tmp_path):
+    """<c:out escapeXml="false"><%=request.getParameter("x")%></c:out>
+    fires jsp-expr AND jsp-el-unescape on one line. Keep jsp-el-unescape
+    (it names WHY the expression bypasses escaping)."""
+    code = ('<c:out escapeXml="false"><%=request.getParameter("x")%></c:out>\n')
+    _, by_line = _scan_snippet(tmp_path, "jsp", code)
+    sinks = by_line.get(1, set())
+    assert "jsp-el-unescape" in sinks, sinks
+    assert "jsp-expr" not in sinks, (
+        f"jsp-expr should have been suppressed, got {sinks}")
+
+
+def test_sink_dedup_django_mark_safe_wins_over_markup(tmp_path):
+    """return mark_safe(Markup(user_input)) fires both markupsafe-markup
+    and django-mark-safe. Keep django-mark-safe (idiomatic Django)."""
+    code = ("from django.utils.safestring import mark_safe\n"
+            "from markupsafe import Markup\n"
+            "def view(request):\n"
+            "    return mark_safe(Markup(request.GET['q']))\n")
+    _, by_line = _scan_snippet(tmp_path, "py", code)
+    sinks_line4 = by_line.get(4, set())
+    assert "django-mark-safe" in sinks_line4, sinks_line4
+    assert "markupsafe-markup" not in sinks_line4, (
+        f"markupsafe-markup should have been suppressed on line 4, "
+        f"got {sinks_line4}")
+
+
+def test_sink_dedup_th_inline_unesc_wins_over_th_utext(tmp_path):
+    """A mixed Thymeleaf node <span th:utext="${x}">[(${x})]</span> matches
+    both th:utext and the inline [( )] form. Keep the less-known inline
+    form (more actionable when someone doesn't know it also unescapes)."""
+    # Use .jsp extension so Java-family sinks (which include Thymeleaf) apply.
+    # In Spring projects Thymeleaf templates usually live in .html files, but
+    # dxa's language router maps Thymeleaf sinks to the Java family; test the
+    # dedup behaviour under that mapping.
+    code = ('<span th:utext="${msg}">[(${msg})]</span>\n')
+    _, by_line = _scan_snippet(tmp_path, "jsp", code)
+    sinks = by_line.get(1, set())
+    assert "th-inline-unesc" in sinks, sinks
+    assert "th-utext" not in sinks, (
+        f"th-utext should have been suppressed, got {sinks}")
+
+
+def test_sink_dedup_render_template_str_wins_over_safe_filter(tmp_path):
+    """render_template_string('...{{ x | safe }}...') fires both
+    render-template-str and jinja-safe-filter. render-template-str is
+    the whole-class attack (template injection); keep it."""
+    code = ("from flask import render_template_string, request\n"
+            "def view():\n"
+            "    return render_template_string('hi {{ x | safe }}', "
+            "x=request.args['q'])\n")
+    _, by_line = _scan_snippet(tmp_path, "py", code)
+    sinks_line3 = by_line.get(3, set())
+    assert "render-template-str" in sinks_line3, sinks_line3
+    assert "jinja-safe-filter" not in sinks_line3, (
+        f"jinja-safe-filter should have been suppressed on line 3, "
+        f"got {sinks_line3}")
+
+
+def test_sink_suppression_table_has_all_phase01_pairs():
+    """Regression: every Phase 0.1 pair still in the table."""
+    pairs = dict(dxa.SINK_SUPPRESSIONS)
+    assert pairs.get("innerHTML") == "angular-bypass"
+    assert pairs.get("jsp-expr") == "jsp-el-unescape"
+    assert pairs.get("markupsafe-markup") == "django-mark-safe"
+    assert pairs.get("th-utext") == "th-inline-unesc"
+    assert pairs.get("jinja-safe-filter") == "render-template-str"
+
+
 # --- PHP detection (v3.4 addition) ------------------------------------------
 
 def test_php_echo_of_superglobal_is_high():
