@@ -985,3 +985,161 @@ def test_stored_mode_auth_and_verdict():
         assert not findings2, "escaped page must not be flagged"
     finally:
         srv.shutdown()
+
+
+# --- Phase 0.2: false-negative discipline (2026-09-26) ----------------------
+#
+# Tests below verify SKIPPED_SUBMITS + _classify_response so that a scan
+# which finds "no reflections" can be distinguished from a scan whose
+# submits were actively blocked by 403 / 429 / WAF-flavoured 4xx.
+
+def _reset_skip_state():
+    dxadyn.SKIPPED_SUBMITS.clear()
+    dxadyn.VERBOSE = False
+    dxadyn.WAF_LOG_FILE = None
+
+
+def test_classify_response_forbidden_bare():
+    """Bare 403 with no WAF-language body -> classified as forbidden."""
+    was, reason = dxadyn._classify_response(403, "")
+    assert was is True
+    assert reason == "forbidden"
+
+
+def test_classify_response_waf_403():
+    """403 with a WAF/Cloudflare-style body -> classified as waf-403."""
+    was, reason = dxadyn._classify_response(
+        403, "<html><body>Access denied by Cloudflare (Incident ID 12).</body>")
+    assert was is True
+    assert reason == "waf-403"
+
+
+def test_classify_response_waf_400():
+    """400 with WAF-language body -> waf-400. Plain 400 (validation error)
+    does NOT trip the skip - that response might still echo the canary."""
+    assert dxadyn._classify_response(400, "field required")[0] is False
+    assert dxadyn._classify_response(400, "blocked by security policy")[1] == "waf-400"
+
+
+def test_classify_response_rate_limit_and_server_error():
+    assert dxadyn._classify_response(429, "")[1] == "rate-limit"
+    assert dxadyn._classify_response(502, "bad gateway")[1] == "server-error"
+    assert dxadyn._classify_response(None, "")[1] == "connection-error"
+
+
+def test_classify_response_healthy_200():
+    """200 (or any 2xx / 3xx) is NEVER a skip."""
+    was, reason = dxadyn._classify_response(200, "welcome")
+    assert was is False and reason is None
+    assert dxadyn._classify_response(301, "")[0] is False
+
+
+def test_record_skip_appends_and_respects_verbose(capsys):
+    _reset_skip_state()
+    dxadyn._record_skip("dxa123", "http://x/", "post", "body",
+                        403, "waf-403", canary='dxa123"<dXsS>')
+    assert len(dxadyn.SKIPPED_SUBMITS) == 1
+    e = dxadyn.SKIPPED_SUBMITS[0]
+    assert e["reason"] == "waf-403"
+    assert e["method"] == "POST"
+    assert e["variant"] == "body"
+
+    # VERBOSE=False = nothing printed to stderr
+    assert "skip" not in capsys.readouterr().err
+
+    dxadyn.VERBOSE = True
+    dxadyn._record_skip("dxa456", "http://x/", "get", "body",
+                        429, "rate-limit")
+    err = capsys.readouterr().err
+    assert "[skip]" in err and "rate-limit" in err and "dxa456" in err
+    _reset_skip_state()
+
+
+def test_maybe_record_skip_short_circuits_on_reflection():
+    """If verdict was 'unencoded' / 'attr-only', we DO NOT record a skip
+    even if the response status was WAF-shaped. A finding trumps skip."""
+    _reset_skip_state()
+    dxadyn._maybe_record_skip("unencoded", "dxaZZ", "http://x/", "post",
+                              "body", 403, "blocked", canary='dxaZZ"<dXsS>')
+    assert dxadyn.SKIPPED_SUBMITS == []
+    dxadyn._maybe_record_skip("absent", "dxaYY", "http://x/", "post",
+                              "body", 403, "blocked", canary='dxaYY"<dXsS>')
+    assert len(dxadyn.SKIPPED_SUBMITS) == 1
+    _reset_skip_state()
+
+
+class _WafReflector(BaseHTTPRequestHandler):
+    """Mock endpoint that returns 403 with a Cloudflare-shaped body when the
+    canary is in the query, otherwise reflects raw. Used to check that a
+    probe_link run records skips instead of silently reporting nothing."""
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        q = parse_qs(u.query).get("q", [""])[0]
+        if "dxa" in q:                                # canary detected -> block
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"Access denied by Cloudflare firewall.")
+        else:
+            body = f"<div>{q}</div>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+
+def test_probe_link_records_waf_skip_when_all_submits_blocked():
+    """A hostile-target reflector 403s every canary. Result: 0 findings AND
+    SKIPPED_SUBMITS full - which is the whole point of Phase 0.2."""
+    _reset_skip_state()
+    srv = HTTPServer(("127.0.0.1", 0), _WafReflector)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        findings = dxadyn.probe_link(
+            f"http://127.0.0.1:{port}/?q=x",
+            variants=["body", "attr-breakout"])
+    finally:
+        srv.shutdown()
+    assert findings == [], "should be silent on findings"
+    assert len(dxadyn.SKIPPED_SUBMITS) == 2                # 1 per variant
+    for e in dxadyn.SKIPPED_SUBMITS:
+        assert e["status"] == 403
+        assert e["reason"] == "waf-403"
+    _reset_skip_state()
+
+
+def test_probe_form_records_skip_on_blocked_submit():
+    """A form-mode probe against a WAF-shaped 403 backend also records skips."""
+    _reset_skip_state()
+    srv = HTTPServer(("127.0.0.1", 0), _WafReflector)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        form = {"action": f"http://127.0.0.1:{port}/", "method": "get",
+                "fields": {"q": ""}}
+        findings = dxadyn.probe_form(form, variants=["body"])
+    finally:
+        srv.shutdown()
+    assert findings == []
+    assert len(dxadyn.SKIPPED_SUBMITS) == 1
+    assert dxadyn.SKIPPED_SUBMITS[0]["reason"] == "waf-403"
+    _reset_skip_state()
+
+
+def test_waf_log_file_written(tmp_path):
+    """--waf-log FILE persists rejected canaries as tab-separated rows."""
+    _reset_skip_state()
+    log_path = tmp_path / "waf.log"
+    dxadyn.WAF_LOG_FILE = str(log_path)
+    dxadyn._record_skip("dxaLOG", "http://x/", "post", "body",
+                        403, "waf-403", canary='dxaLOG"<dXsS>')
+    content = log_path.read_text(encoding="utf-8")
+    assert "waf-403" in content and "dxaLOG" in content
+    fields = content.strip().split("\t")
+    assert fields[0] == "waf-403"
+    assert fields[2] == "dxaLOG"
+    _reset_skip_state()

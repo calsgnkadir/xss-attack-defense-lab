@@ -140,6 +140,95 @@ def _opener():
 OPENER = _opener()
 EXTRA_HEADERS = {}          # populated by --header / --cookie CLI flags (v3.1)
 
+# Phase 0.2 (2026-09-26): false-negative discipline.
+# When the bot sends a canary and the SERVER actively refuses it (403, 429,
+# WAF-style 400, connection error), record that fact instead of silently
+# treating "no reflection" as "target is safe". The scan summary at the end
+# tells the operator: N reflections found, K submits rejected - so silence
+# in the reflections column stops being ambiguous.
+SKIPPED_SUBMITS = []        # list of {canary_id, url, method, variant, status, reason}
+VERBOSE = False             # print each skip inline (set by main() from --verbose)
+WAF_LOG_FILE = None         # append rejected canaries to this file (set from --waf-log)
+
+# Patterns that, on a 4xx/5xx response, suggest the layer that rejected the
+# request was a WAF / edge filter rather than the target app's own validation.
+_WAF_INDICATORS = re.compile(
+    r'\b(?:blocked?|denied|forbidden|waf|firewall|security\s+policy|'
+    r'incident\s+id|access\s+denied|banned|rate\s*limit(?:ed)?|'
+    r'suspicious\s+activity|malicious\s+request|policy\s+violation|'
+    r'threat\s+detected|cloudflare|akamai|imperva|barracuda)\b',
+    re.IGNORECASE,
+)
+
+
+def _classify_response(status, body):
+    """Return (was_skip, reason). Informational only - never overrides
+    verdicting. A 4xx that still echoes the canary is still a finding; a
+    4xx that swallowed the canary just tells the operator WHY silence."""
+    if status is None:
+        return True, "connection-error"
+    peek = (body or "")[:2000]
+    if status == 403:
+        return True, "waf-403" if _WAF_INDICATORS.search(peek) else "forbidden"
+    if status == 429:
+        return True, "rate-limit"
+    if status == 503 and _WAF_INDICATORS.search(peek):
+        return True, "waf-503"
+    if 500 <= status < 600:
+        return True, "server-error"
+    if status == 400 and _WAF_INDICATORS.search(peek):
+        return True, "waf-400"
+    return False, None
+
+
+def _record_skip(cid, url, method, variant, status, reason, canary=None):
+    """Append a skip event to SKIPPED_SUBMITS; honour VERBOSE + WAF_LOG_FILE.
+    Best-effort file write - a failed log never aborts the scan."""
+    entry = {"canary_id": cid, "url": url,
+             "method": (method or "GET").upper(),
+             "variant": variant, "status": status, "reason": reason}
+    SKIPPED_SUBMITS.append(entry)
+    if VERBOSE:
+        print(f"[skip] {url}  [{entry['method']}]  variant={variant}  "
+              f"reason={reason}  status={status}  cid={cid}",
+              file=sys.stderr)
+    if WAF_LOG_FILE is not None and canary is not None:
+        try:
+            with open(WAF_LOG_FILE, "a", encoding="utf-8") as fh:
+                fh.write(f"{reason}\t{status}\t{cid}\t{entry['method']}\t"
+                         f"{url}\t{canary}\n")
+        except OSError:
+            pass
+
+
+def _maybe_record_skip(v, cid, url, method, variant, status, body, canary=None):
+    """Convenience: if verdict wasn't a reflection AND response looked like
+    an active rejection, record it. Called by every probe path."""
+    if v in ("unencoded", "attr-only"):
+        return
+    was_skip, reason = _classify_response(status, body or "")
+    if was_skip:
+        _record_skip(cid, url, method, variant, status, reason, canary)
+
+
+def _print_skip_summary():
+    """Print the Phase 0.2 tail summary. Shown after every scan mode so silence
+    in the findings column can be distinguished from active rejection. When
+    nothing was skipped, prints a one-line 'submits clean' note so the operator
+    knows the discipline ran (not that it was disabled)."""
+    if not SKIPPED_SUBMITS:
+        print("[dxadyn] submits clean: 0 rejected (no 403/429/WAF/connection-error).")
+        return
+    counts = {}
+    for e in SKIPPED_SUBMITS:
+        counts[e["reason"]] = counts.get(e["reason"], 0) + 1
+    breakdown = ", ".join(f"{k}: {v}" for k, v in
+                          sorted(counts.items(), key=lambda kv: -kv[1]))
+    print(f"[dxadyn] {len(SKIPPED_SUBMITS)} submit(s) rejected by the server "
+          f"(silence != safe). Breakdown: {breakdown}."
+          + ("" if VERBOSE else "  Re-run with --verbose to see each one.")
+          + ("" if WAF_LOG_FILE is None else f"  Full log: {WAF_LOG_FILE}."))
+
 
 def fetch(url, data=None, method=None):
     """GET (data=None) / POST (data=dict) / any HTTP method (method='PUT'|...).
@@ -428,6 +517,9 @@ def probe_form(form, variants=None, waf_bypass=False):
                 out.append(_finding(form["action"], form["method"], target, v, status,
                                     context=ctx, canary_id=cid, content_type=_ct,
                                     variant=vname))
+            else:
+                _maybe_record_skip(v, cid, form["action"], form["method"],
+                                   vname, status, body, canary)
     return out
 
 
@@ -449,6 +541,9 @@ def probe_link(link, variants=None, waf_bypass=False):
                                     "GET", name, v, status,
                                     context=ctx, canary_id=cid, content_type=_ct,
                                     variant=vname))
+            else:
+                _maybe_record_skip(v, cid, url, "GET",
+                                   vname, status, body, canary)
     return out
 
 
@@ -581,6 +676,15 @@ def probe_stored(target_url, target_field, extra_fields, check_urls,
         sub_status, _ = _do_submit(target_url, target_field, extra_fields, canary,
                                    method=method, csrf_field=csrf_field,
                                    json_body=json_body, header_target=header_target)
+        # Phase 0.2: if the SUBMIT itself was actively rejected (WAF-403,
+        # 429, connection-error), record it. The check pass below still runs
+        # because a rejection at the submit layer can still coexist with
+        # a stored reflection on some prior write; but silence downstream
+        # will now be explained.
+        sub_was_skip, sub_reason = _classify_response(sub_status, "")
+        if sub_was_skip:
+            _record_skip(cid, target_url, method, vname, sub_status,
+                         f"submit:{sub_reason}", canary)
         for raw_url in check_urls:
             url = raw_url.replace("{CID}", cid)
             st, _, body, _ct = fetch(url)
@@ -593,6 +697,9 @@ def probe_stored(target_url, target_field, extra_fields, check_urls,
                             "sub_status": sub_status, "check_status": st, "canary_id": cid,
                             "context": ctx, "severity": sev, "content_type": _ct,
                             "variant": vname})
+            else:
+                _maybe_record_skip(v, cid, url, "GET",
+                                   f"{vname}[check]", st, body, canary)
     # Return first cid for backward-compat single-variant callers; the full list
     # is on findings[i].canary_id for multi-variant callers.
     return out, cids[0] if cids else ""
@@ -728,6 +835,11 @@ def probe_stored_auto(target_url, target_field, extra_fields, seed_urls,
             json_body=json_body, header_target=header_target)
         submits.append((vname, cid, marker, sub_status))
         landing = landing or this_landing
+        # Phase 0.2: submit-layer skip observability
+        sub_was_skip, sub_reason = _classify_response(sub_status, "")
+        if sub_was_skip:
+            _record_skip(cid, target_url, method, vname, sub_status,
+                         f"submit:{sub_reason}", canary)
     first_cid = submits[0][1] if submits else ""
 
     # Phase 2: assemble crawl seeds. {CID} in user seeds is replaced with the
@@ -817,6 +929,9 @@ def probe_headers(url, header_names, variants=None, waf_bypass=False):
                     "severity": sev, "canary_id": cid, "content_type": _ct,
                     "variant": vname,
                 })
+            else:
+                _maybe_record_skip(v, cid, url, "GET",
+                                   f"{vname}[hdr:{name}]", status, body, canary)
     return findings
 
 
@@ -1011,7 +1126,25 @@ def main():
                          "--header 'Authorization: Bearer eyJ...' or "
                          "--header 'X-CSRF-Token: abc'")
 
+    # Phase 0.2: false-negative discipline
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="print one [skip] line to stderr for every submit "
+                         "the SERVER actively rejected (403, 429, WAF-flavoured "
+                         "400/503, connection-error). Silence in the findings "
+                         "column no longer means 'target is safe' - it means "
+                         "'nothing found AND K submits were blocked, here they are'.")
+    ap.add_argument("--waf-log", metavar="FILE", default="",
+                    help="append every rejected canary (reason, status, cid, "
+                         "method, url, canary) as a tab-separated row to FILE. "
+                         "Best-effort; a failed write never aborts the scan.")
+
     args = ap.parse_args()
+
+    # Wire Phase 0.2 CLI flags into the module-level state that _record_skip reads
+    global VERBOSE, WAF_LOG_FILE
+    VERBOSE = bool(args.verbose)
+    WAF_LOG_FILE = args.waf_log or None
+    SKIPPED_SUBMITS.clear()
 
     if args.cookie:
         apply_cookie(args.cookie)
@@ -1110,6 +1243,7 @@ def main():
 
         if not findings:
             print("No unencoded stored reflection found.")
+            _print_skip_summary()
             sys.exit(0)
         for f in findings:
             tag = "UNENCODED (HTML injection)" if f["reflection"] == "unencoded" \
@@ -1130,6 +1264,7 @@ def main():
               f"{execs} EXECUTABLE (body/free context; runs as-is), "
               f"{breakout} need a follow-on breakout (title/attr/script context). "
               f"Confirm each in the browser.")
+        _print_skip_summary()
         sys.exit(1)
 
     # --- reflected (v1) path ---
@@ -1173,6 +1308,7 @@ def main():
 
     if not findings:
         print("No unencoded reflections found. (Inputs may be encoded, POST-guarded, or absent.)")
+        _print_skip_summary()
         sys.exit(0)
 
     for f in findings:
@@ -1190,6 +1326,7 @@ def main():
           f"{execs} EXECUTABLE (body/free context), "
           f"{breakout} need a follow-on breakout. "
           f"Confirm each in the browser.")
+    _print_skip_summary()
     sys.exit(1)
 
 
