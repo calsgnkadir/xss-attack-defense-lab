@@ -379,6 +379,152 @@ def test_sanitize_covers_rhs_paren_tracking_loss_is_conservative():
     ) is False
 
 
+# --- Phase 0.4: cross-file basic taint (2026-09-26) -------------------------
+#
+# Two-file fixtures: util.<ext> returns raw source, app.<ext> writes the
+# return value to a sink. Before Phase 0.4, dxa scanned per-file and marked
+# app's sink as MEDIUM (dynamic content only). Now the pre-pass sees
+# util.getUserInput as tainted-returning; app's sink call is upgraded to
+# HIGH via xfunc_hits.
+
+def test_cross_file_taint_python_two_file(tmp_path):
+    (tmp_path / "util.py").write_text(
+        "from flask import request\n"
+        "def get_user_input():\n"
+        "    return request.args.get('q')\n",
+        encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "from util import get_user_input\n"
+        "from flask import render_template_string\n"
+        "def view():\n"
+        "    val = get_user_input()\n"
+        "    return render_template_string('hi ' + val)\n",
+        encoding="utf-8")
+
+    files = list(dxa.iter_files(str(tmp_path)))
+    xfuncs = dxa.build_cross_file_taint_map(files)
+    assert "get_user_input" in xfuncs
+
+    findings = []
+    for f in files:
+        findings.extend(dxa.scan_file(f, cross_file_funcs=xfuncs))
+
+    # find the render_template_string sink line in app.py
+    app_highs = [f for f in findings
+                 if f["file"].endswith("app.py") and f["confidence"] == "high"]
+    assert app_highs, (
+        f"cross-file taint should promote render_template_string to HIGH; "
+        f"got {[(f['sink'], f['confidence']) for f in findings if f['file'].endswith('app.py')]}")
+
+
+def test_cross_file_taint_js_two_file(tmp_path):
+    (tmp_path / "util.js").write_text(
+        "function getUserInput() {\n"
+        "    return location.hash;\n"
+        "}\n"
+        "module.exports = { getUserInput };\n",
+        encoding="utf-8")
+    (tmp_path / "app.js").write_text(
+        "const { getUserInput } = require('./util');\n"
+        "function render() {\n"
+        "    const el = document.getElementById('x');\n"
+        "    el.innerHTML = getUserInput();\n"
+        "}\n",
+        encoding="utf-8")
+
+    files = list(dxa.iter_files(str(tmp_path)))
+    xfuncs = dxa.build_cross_file_taint_map(files)
+    assert "getUserInput" in xfuncs
+
+    findings = []
+    for f in files:
+        findings.extend(dxa.scan_file(f, cross_file_funcs=xfuncs))
+
+    app_highs = [f for f in findings
+                 if f["file"].endswith("app.js") and f["confidence"] == "high"
+                 and f["sink"] == "innerHTML"]
+    assert app_highs, (
+        f"cross-file taint should promote .innerHTML= to HIGH; "
+        f"got {[(f['sink'], f['confidence']) for f in findings if f['file'].endswith('app.js')]}")
+
+
+def test_cross_file_taint_php_two_file(tmp_path):
+    (tmp_path / "util.php").write_text(
+        "<?php\n"
+        "function getUserInput() {\n"
+        "    return $_GET['q'];\n"
+        "}\n",
+        encoding="utf-8")
+    (tmp_path / "app.php").write_text(
+        "<?php\n"
+        "require_once 'util.php';\n"
+        "$val = getUserInput();\n"
+        "echo $val;\n",
+        encoding="utf-8")
+
+    files = list(dxa.iter_files(str(tmp_path)))
+    xfuncs = dxa.build_cross_file_taint_map(files)
+    assert "getUserInput" in xfuncs
+
+    findings = []
+    for f in files:
+        findings.extend(dxa.scan_file(f, cross_file_funcs=xfuncs))
+
+    app_highs = [f for f in findings
+                 if f["file"].endswith("app.php") and f["confidence"] == "high"]
+    assert app_highs, (
+        f"cross-file taint should promote echo to HIGH; got "
+        f"{[(f['sink'], f['confidence']) for f in findings if f['file'].endswith('app.php')]}")
+
+
+def test_cross_file_taint_map_ignores_non_tainted_returns(tmp_path):
+    """A function that returns a hardcoded string or literal must NOT be
+    added to the tainted-returns map."""
+    (tmp_path / "clean.py").write_text(
+        "def get_greeting():\n"
+        "    return 'hello world'\n"
+        "def compute_id(x):\n"
+        "    return str(x) + '-suffix'\n"
+        "def get_secret_key():\n"
+        "    return 'abc123'\n",
+        encoding="utf-8")
+    files = list(dxa.iter_files(str(tmp_path)))
+    xfuncs = dxa.build_cross_file_taint_map(files)
+    assert xfuncs == set(), (
+        f"functions with no source in return path should not taint; got {xfuncs}")
+
+
+def test_cross_file_taint_indent_tracking_python_avoids_leaking_to_next_def(tmp_path):
+    """Python indent tracking: after a def returns tainted, the NEXT def's
+    body must NOT be considered part of the first function."""
+    (tmp_path / "mix.py").write_text(
+        "from flask import request\n"
+        "def tainted():\n"
+        "    return request.args['q']\n"
+        "def clean():\n"
+        "    return 'literal'\n",
+        encoding="utf-8")
+    files = list(dxa.iter_files(str(tmp_path)))
+    xfuncs = dxa.build_cross_file_taint_map(files)
+    assert xfuncs == {"tainted"}, (
+        f"only 'tainted' should be in the set; got {xfuncs}")
+
+
+def test_scan_file_backward_compat_no_cross_file_arg():
+    """A single-file scan call without cross_file_funcs must behave
+    exactly as before Phase 0.4 (no regression on the existing corpus)."""
+    findings_a = scan("vulnerable.js")                    # legacy call
+    findings_b = dxa.scan_file(os.path.join(EX, "vulnerable.js"),
+                                cross_file_funcs=set())
+    # every finding matched by sink+line+confidence; drops xfunc_calls key
+    # from b for the compare so this test isn't sensitive to key ordering
+    def _norm(f):
+        return {k: v for k, v in f.items() if k != "xfunc_calls"}
+    a = sorted(findings_a, key=lambda f: (f["line"], f["sink"]))
+    b = sorted(findings_b, key=lambda f: (f["line"], f["sink"]))
+    assert [_norm(x) for x in a] == [_norm(x) for x in b]
+
+
 # --- PHP detection (v3.4 addition) ------------------------------------------
 
 def test_php_echo_of_superglobal_is_high():

@@ -433,7 +433,108 @@ def _joined_for_taint(lines, terminator=";", max_join=8):
     return joined
 
 
-def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
+# Phase 0.4 (2026-09-26): cross-file taint pre-pass. When the project
+# scan starts, walk every file once and build a `set()` of function
+# names whose body includes `return <raw source>` (returning a request /
+# location / superglobal directly). During compute_taint, a call to any
+# name in that set is treated the same as a direct source access - the
+# assignment target becomes tainted. Regex-based, no AST, no import
+# resolution: cross-file taint is proven by name-shape only, which is
+# imprecise but catches the common util.py -> app.py shape.
+# Java / C# skipped here (class + method resolution needs more machinery
+# than regex; scheduled for Phase 4 tree-sitter work).
+_FUNC_DEF_RE = {
+    "py":  re.compile(r'^\s*def\s+(\w+)\s*\('),
+    "js":  re.compile(r'^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\('),
+    "php": re.compile(r'^\s*(?:public\s+|private\s+|protected\s+|static\s+)*'
+                      r'function\s+(\w+)\s*\('),
+}
+_RETURN_TAINTED_RE = {
+    "py":  re.compile(r'\breturn\b[^#]*?('
+                      r'request\s*\.\s*(?:args|form|values|json|cookies|'
+                      r'headers|view_args|GET|POST|META)|'
+                      r'os\.environ|sys\.stdin|input\s*\(|'
+                      r'flask\.request|starlette.*request)'),
+    "js":  re.compile(r'\breturn\b[^;]*?('
+                      r'document\s*\.\s*(?:location|URL|referrer|cookie|'
+                      r'documentURI|baseURI)|'
+                      r'window\s*\.\s*(?:location|name)|'
+                      r'\blocation\s*\.\s*(?:hash|search|href|pathname)|'
+                      r'(?:local|session)Storage)'),
+    "php": re.compile(r'\breturn\b[^;]*?\$_(?:GET|POST|REQUEST|COOKIE|'
+                      r'SERVER|FILES|SESSION|ENV)\b'),
+}
+
+
+def build_cross_file_taint_map(paths):
+    """Return `set()` of function names whose body includes `return <source>`.
+    Function-body tracking is language-shaped:
+      - Python: indent-based (body ends when indent <= def's own indent).
+      - JS / PHP: brace-depth counter from the opening `{`.
+    Both approaches are approximations - nested defs, decorators that eat
+    the body, and single-expression arrow functions can be missed. Anything
+    the pre-pass misses stays medium/low; nothing here can UPGRADE a wrong
+    signal (misclassifying a benign function as tainted-returning would
+    just raise a MEDIUM to HIGH for its callers - still triage-worthy)."""
+    tainted_funcs = set()
+    for path in paths:
+        lang = _lang_for(path)[0]
+        if lang not in _FUNC_DEF_RE:
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                lines = fh.read().split("\n")
+        except OSError:
+            continue
+        def_re = _FUNC_DEF_RE[lang]
+        ret_re = _RETURN_TAINTED_RE[lang]
+        if lang == "py":
+            current, base_indent = None, -1
+            for line in lines:
+                m = def_re.match(line)
+                if m:
+                    current = m.group(1)
+                    base_indent = len(line) - len(line.lstrip())
+                    continue
+                if current is None:
+                    continue
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                line_indent = len(line) - len(line.lstrip())
+                if line_indent <= base_indent:
+                    current, base_indent = None, -1
+                    continue
+                if ret_re.search(line):
+                    tainted_funcs.add(current)
+        else:                                       # js / php - brace depth
+            current, depth = None, 0
+            for line in lines:
+                # Comments strip - shallow but avoids most FP inside a /* */
+                stripped_line = re.sub(r'//.*$', '', line)
+                if current is None:
+                    m = def_re.match(line)
+                    if not m:
+                        continue
+                    current = m.group(1)
+                    depth = (stripped_line.count("{") -
+                             stripped_line.count("}"))
+                    if depth == 0:
+                        # single-line function - inspect same line for return
+                        if ret_re.search(line):
+                            tainted_funcs.add(current)
+                        current = None
+                    continue
+                if ret_re.search(line):
+                    tainted_funcs.add(current)
+                depth += stripped_line.count("{") - stripped_line.count("}")
+                if depth <= 0:
+                    current, depth = None, 0
+    return tainted_funcs
+
+
+def compute_taint(lines, sources, msg_active, assign_re=ASSIGN,
+                  cross_file_funcs=None):
     """A var is tainted if assigned from a source or another tainted var.
     Bounded fix-point - a cheap approximation of straight-line data flow.
     Runs on JS, PHP, Java, Python (each with its own assign regex).
@@ -454,8 +555,25 @@ def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
          only when `_sanitize_covers_rhs` confirms the residual RHS
          (RHS minus every sanitize(...) span) has no unmitigated source
          or tainted variable. Otherwise taint propagates.
-    Conservative on paren-tracking loss = more findings, fewer FN."""
+    Conservative on paren-tracking loss = more findings, fewer FN.
+
+    Phase 0.4: `cross_file_funcs` = set of function names known to return a
+    raw source (built by build_cross_file_taint_map from the whole project
+    before any file is scanned). When set, a call to any of those names on
+    the RHS taints the LHS - the same-file `source_hits` check gains a
+    cross-file cousin. Import resolution is not modelled (regex, no AST):
+    if the function name is unique enough in the project, the shape works;
+    if two projects reuse the same name for different behaviour, this is
+    the false-positive risk we accept in Phase 0.4."""
     tainted = set()
+    xfuncs = cross_file_funcs or set()
+    # Precompile a single alternation regex for the cross-file call check -
+    # much cheaper than N separate re.search() calls per RHS in the fix-point.
+    xfunc_call_re = None
+    if xfuncs:
+        xfunc_call_re = re.compile(
+            r'(?<!\w)(?:' + "|".join(re.escape(n) for n in xfuncs) +
+            r')\s*\(')
     for _ in range(6):
         changed = False
         for line in lines:
@@ -474,9 +592,10 @@ def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
                 if _sanitize_covers_rhs(rhs, sources, msg_active, tainted):
                     continue
                 # else: fall through - propagate taint
-            if source_hits(rhs, sources, msg_active) or any(
-                re.search(r'(?<!\w)' + re.escape(v) + r'\b', rhs) for v in tainted
-            ):
+            if (source_hits(rhs, sources, msg_active)
+                or any(re.search(r'(?<!\w)' + re.escape(v) + r'\b', rhs)
+                       for v in tainted)
+                or (xfunc_call_re is not None and xfunc_call_re.search(rhs))):
                 if lhs not in tainted:
                     tainted.add(lhs)
                     changed = True
@@ -501,7 +620,11 @@ def _lang_for(path):
     return "cs", CS_SINKS, CS_SOURCES, ASSIGN, False
 
 
-def scan_file(path):
+def scan_file(path, cross_file_funcs=None):
+    """Scan a single file for XSS-family sinks. Phase 0.4: optional
+    `cross_file_funcs` set is passed through to compute_taint AND used to
+    upgrade sink-line confidence when the sink argument is a call to a
+    known tainted-returning function from another file in the project."""
     lang, sinks, sources, assign_re, wants_taint = _lang_for(path)
 
     try:
@@ -515,9 +638,16 @@ def scan_file(path):
     # generic types); join by `;` before taint so multi-line sanitize()
     # wraps are visible. JS/PHP/Python usually single-line - default OK.
     taint_view = _joined_for_taint(lines) if lang in ("java", "cs") else lines
-    tainted = (compute_taint(taint_view, sources, msg_active, assign_re)
+    tainted = (compute_taint(taint_view, sources, msg_active, assign_re,
+                             cross_file_funcs=cross_file_funcs)
                if wants_taint else set())
     dynamic = re.compile(r'[A-Za-z_$@][\w$]*')
+
+    # Phase 0.4: precompiled sink-line xfunc detector (empty regex if map empty).
+    xfuncs = cross_file_funcs or set()
+    xfunc_call_re = (re.compile(
+        r'(?<!\w)(?:' + "|".join(re.escape(n) for n in xfuncs) + r')\s*\(')
+        if xfuncs else None)
 
     findings = []
     for lineno, line in enumerate(lines, 1):
@@ -531,7 +661,13 @@ def scan_file(path):
             srcs = source_hits(line, sources, msg_active)
             tvars = [v for v in tainted
                      if re.search(r'(?<!\w)' + re.escape(v) + r'\b', line)]
-            if srcs or tvars:
+            # Phase 0.4: cross-file call directly on the sink line - upgrade
+            # confidence too. E.g. `res.send(getUserInput())` where
+            # getUserInput lives in util.js and returns req.query raw.
+            xfunc_hits = ([fname for fname in xfuncs
+                          if re.search(r'(?<!\w)' + re.escape(fname) + r'\s*\(', line)]
+                          if xfunc_call_re and xfunc_call_re.search(line) else [])
+            if srcs or tvars or xfunc_hits:
                 confidence = "high"
             elif dynamic.search(line.split("//", 1)[0]):
                 confidence = "medium"
@@ -558,6 +694,8 @@ def scan_file(path):
                 "file": path, "line": lineno, "sink": sid, "lang": lang,
                 "severity": severity, "confidence": confidence, "description": desc,
                 "code": line.strip()[:200], "sources": srcs, "tainted_vars": tvars,
+                "xfunc_calls": xfunc_hits,           # Phase 0.4: which cross-file
+                                                     # tainted funcs this sink calls
             })
     return findings
 
@@ -647,9 +785,16 @@ def main():
     args = ap.parse_args()
 
     floor = CONF_RANK[args.min_confidence]
+    # Phase 0.4: two-pass scan. First collect the full file list (one os.walk
+    # traversal), then pre-build the cross-file tainted-return function map
+    # over Python + JS + PHP files. Java / C# skipped in Phase 0.4. The map is
+    # then handed to every per-file scan so `foo(request.args['q'])`-shaped
+    # helpers in util.py taint their callers' locals in app.py.
+    all_files = list(iter_files(args.target))
+    xfunc_map = build_cross_file_taint_map(all_files) if len(all_files) > 1 else set()
     findings = []
-    for f in iter_files(args.target):
-        findings.extend(scan_file(f))
+    for f in all_files:
+        findings.extend(scan_file(f, cross_file_funcs=xfunc_map))
     findings = [f for f in findings if CONF_RANK[f["confidence"]] >= floor]
     findings.sort(key=lambda f: (-CONF_RANK[f["confidence"]], f["file"], f["line"]))
 
