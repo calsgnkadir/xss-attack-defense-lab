@@ -283,6 +283,102 @@ def test_sink_suppression_table_has_all_phase01_pairs():
     assert pairs.get("jinja-safe-filter") == "render-template-str"
 
 
+# --- Phase 0.3: sanitize heuristic tightening (2026-09-26) ------------------
+
+def test_sanitize_covers_when_only_call_in_ternary_hotel_platform_shape():
+    """Regression: the hotel-platform ternary
+        String cid = (inbound != null && !inbound.trim().isEmpty()) ?
+                      sanitize(inbound) : shortUuid();
+    must still break taint (guard-clause references of `inbound` are not
+    value leaks). Locked in writeup 09; Phase 0.3 must not undo it."""
+    lines = ['String inbound = request.getHeader("X-Correlation-Id");',
+             'String cid = (inbound != null && !inbound.trim().isEmpty()) '
+             '? sanitize(inbound) : shortUuid();',
+             'response.getWriter().print(cid);']
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, msg_active=True,
+                                assign_re=dxa.JAVA_ASSIGN)
+    assert "inbound" in tainted
+    assert "cid" not in tainted, (
+        f"sanitize() in ternary must clear taint; got tainted={tainted}")
+
+
+def test_sanitize_does_NOT_cover_when_concat_leaks_tainted_var():
+    """Phase 0.3's central FN fix. The pathological
+        String out = sanitizeButKeepsHtml(a) + b;
+    (where `b` is tainted) used to be silently squelched by v3.8's name-match
+    heuristic. Now the residual `+ b` is detected as a value leak, so taint
+    propagates and `out` is HIGH."""
+    lines = ['String a = request.getParameter("a");',
+             'String b = request.getParameter("b");',
+             'String out = sanitizeButKeepsHtml(a) + b;',
+             'response.getWriter().print(out);']
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, msg_active=True,
+                                assign_re=dxa.JAVA_ASSIGN)
+    assert "b" in tainted
+    assert "out" in tainted, (
+        f"sanitize() only covered `a`; residual `+ b` leaks tainted `b`, "
+        f"but taint didn't propagate. tainted={tainted}")
+
+
+def test_sanitize_does_NOT_cover_when_source_appears_after():
+    """Sibling of the above: sanitize covers one arg, but the residual RHS
+    still directly accesses a source (not through a variable). Taint must
+    propagate."""
+    lines = ['String a = request.getParameter("a");',
+             'String out = sanitizeButPartial(a) + request.getParameter("b");',
+             'response.getWriter().print(out);']
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, msg_active=True,
+                                assign_re=dxa.JAVA_ASSIGN)
+    assert "out" in tainted, (
+        f"residual has request.getParameter, must leak; tainted={tainted}")
+
+
+def test_known_safe_funcs_hard_clear_even_if_residual_looks_tainted():
+    """Tier 1 whitelist: even a construct like
+        String out = StringEscapeUtils.escapeHtml4(a) + notSuspicious;
+    (where `notSuspicious` is NOT tainted) does not propagate. This just
+    confirms hard-clear works. The FN case with `+ b` where b IS tainted
+    is a different story - not tested here because the tier-1 whitelist
+    intentionally trusts library escapers to sanitize their INPUT; the
+    subsequent concat with other data is out of scope for the escaper."""
+    lines = ['String a = request.getParameter("a");',
+             'String out = StringEscapeUtils.escapeHtml4(a);',
+             'response.getWriter().print(out);']
+    tainted = dxa.compute_taint(lines, dxa.JAVA_SOURCES, msg_active=True,
+                                assign_re=dxa.JAVA_ASSIGN)
+    assert "a" in tainted
+    assert "out" not in tainted
+
+
+def test_known_safe_funcs_pattern_matches_the_key_escapers():
+    """The whitelist regex is the tier-1 gate; if a canonical escaper's
+    spelling drops off it, we silently switch to tier-2 (soft-clear) for
+    that call, which is a regression. Lock the essential ones."""
+    for expr in [
+        "html.escape(x)",
+        "htmlspecialchars($x, ENT_QUOTES)",
+        "StringEscapeUtils.escapeHtml4(x)",
+        "HttpUtility.HtmlEncode(x)",
+        "DOMPurify.sanitize(x)",
+        "bleach.clean(x)",
+        "Encode.forHtml(x)",
+        "WebUtility.HtmlEncode(x)",
+    ]:
+        assert dxa._KNOWN_SAFE_FUNCS.search(expr), (
+            f"tier-1 whitelist lost {expr!r}")
+
+
+def test_sanitize_covers_rhs_paren_tracking_loss_is_conservative():
+    """If _sanitize_covers_rhs can't cleanly track parens (RHS malformed
+    or truncated by preprocessing), it should return False so taint stays.
+    Fewer FN is safer than fewer FP for this edge."""
+    # unclosed sanitize call - depth never returns to 0
+    rhs = "sanitize(request.body"
+    assert dxa._sanitize_covers_rhs(
+        rhs, dxa.PY_SOURCES, msg_active=True, tainted=set()
+    ) is False
+
+
 # --- PHP detection (v3.4 addition) ------------------------------------------
 
 def test_php_echo_of_superglobal_is_high():

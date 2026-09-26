@@ -279,6 +279,100 @@ _SANITIZE_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# Phase 0.3 (2026-09-26). A NARROW whitelist of functions we are confident
+# actually escape HTML - not name-shape guesses, but library functions whose
+# semantics we know. Anything here hard-clears taint on its line even if the
+# residual RHS looks tainted (unusual, but conservative for real escapers).
+# The broader `_SANITIZE_HINT` above still catches app-local sanitize helpers,
+# but now only SOFT-clears (see `_sanitize_covers_rhs` below).
+_KNOWN_SAFE_FUNCS = re.compile(
+    r'\b('
+    # Python
+    r'html\.escape|markupsafe\.escape|bleach\.clean|nh3\.clean|'
+    # PHP
+    r'htmlspecialchars|htmlentities|'
+    # Java
+    r'StringEscapeUtils\.escapeHtml[34]?|HtmlUtils\.htmlEscape|'
+    r'Encode\.forHtml(?:Attribute|Content)?|ESAPI\.encoder\(\)\.encodeForHTML|'
+    # C# / .NET
+    r'HttpUtility\.HtmlEncode|WebUtility\.HtmlEncode|'
+    r'HtmlEncoder\.(?:Default|Create)|AntiXssEncoder\.HtmlEncode|'
+    # JS (browser + libraries)
+    r'DOMPurify\.sanitize|he\.encode|_\.escape|escape-html'
+    r')\s*\(',
+    # NB: intentionally case-sensitive - `htmlspecialchars` is PHP-specific
+    # spelling; we don't want to squelch a hypothetical `HTMLspecialCHARS`
+    # user helper by accident.
+)
+
+
+def _sanitize_covers_rhs(rhs, sources, msg_active, tainted):
+    """Phase 0.3. When `_SANITIZE_HINT` matched but the function isn't in the
+    known-safe whitelist, verify the sanitizer plausibly covers ALL the taint
+    on this line. Strategy: strip every `sanitizerName(...)` span from the
+    RHS, then look for POSITIVE leak patterns in the residual:
+      - `+ tainted`, `tainted +`      concat
+      - `, tainted`, `tainted ,`      function argument
+      - `= tainted`                    reassignment / kwarg
+      - source-access shapes (`request.args[...]`, etc.) still present
+    A `tainted != null` or `tainted.isEmpty()` in a ternary condition is
+    NOT a leak (the value doesn't reach the LHS), so those guard-clause
+    shapes still let the sanitizer cover the flow. This is what preserves
+    the hotel-platform ternary
+        String cid = (inbound != null && !inbound.trim().isEmpty()) ?
+                      sanitize(inbound) : shortUuid();
+    which we already documented in writeup 09.
+
+    Returns True (sanitizer covers everything, break the chain) or
+    False (residual leak, propagate). Conservative on paren-tracking loss:
+    treat as NOT covered - safer default (more findings, fewer FN)."""
+    residual = []
+    i = 0
+    n = len(rhs)
+    while i < n:
+        m = _SANITIZE_HINT.match(rhs, i)
+        if m:
+            # jump past the matched `sanitizerName(` (m.end() is after `(`)
+            i = m.end()
+            depth = 1
+            while i < n and depth > 0:
+                c = rhs[i]
+                if c == '(':
+                    depth += 1
+                elif c == ')':
+                    depth -= 1
+                i += 1
+            # if we ran off the end without closing, be conservative:
+            # treat as "not covered" (more taint, more findings)
+            if depth > 0:
+                return False
+        else:
+            residual.append(rhs[i])
+            i += 1
+    residual_str = ''.join(residual)
+    # Strip string literals so a canary-shaped string in a "..." doesn't fool us.
+    residual_str = re.sub(r'"[^"]*"', '', residual_str)
+    residual_str = re.sub(r"'[^']*'", '', residual_str)
+    # A raw source access outside the sanitize span IS a value leak.
+    if source_hits(residual_str, sources, msg_active):
+        return False
+    # A tainted var name outside the sanitize span is only a LEAK when it
+    # appears in a value-producing position (concat / function arg / assign),
+    # not in a boolean guard clause like `!= null` or `.isEmpty()`.
+    for v in tainted:
+        pat = re.compile(
+            # +tainted / tainted+ / -tainted (concat, arithmetic-as-concat in JS)
+            r'(?:\+\s*|-\s*)' + re.escape(v) + r'\b' + r'|'
+            r'\b' + re.escape(v) + r'\s*(?:\+|-)' + r'|'
+            # (tainted , (tainted , tainted) - function argument position
+            r'[,\(]\s*' + re.escape(v) + r'\s*[,\)]' + r'|'
+            # = tainted (rhs of nested assignment inside residual)
+            r'=\s*' + re.escape(v) + r'\b'
+        )
+        if pat.search(residual_str):
+            return False
+    return True
+
 # v3.9 finding dedup. When the same line matches multiple sink patterns that
 # overlap semantically (a specific one is a subset of a general one), report
 # ONLY the general - the specific was there for extra clarity but a single
@@ -348,7 +442,19 @@ def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
     `clean(...)`, `StringEscapeUtils.escapeHtml4(...)`, `html.escape(...)`,
     local `validateXxx(...)`, ...), the assignment BREAKS the taint chain.
     This kills the cross-method-helper false positive that pure same-line
-    regex analysis can't otherwise see."""
+    regex analysis can't otherwise see.
+
+    Phase 0.3 (2026-09-26): the v3.8 break was UNCONDITIONAL - any sanitize-
+    shaped name in the RHS would clear taint even when the sanitize call
+    only covered part of the expression (`sanitize(x) + tainted` was
+    silently squelched, an ugly FN). The new logic is two-tier:
+      1. `_KNOWN_SAFE_FUNCS` (narrow, library-confirmed escapers) hard-
+         clears the taint chain as before.
+      2. `_SANITIZE_HINT` (broad name-shape) now only soft-clears - and
+         only when `_sanitize_covers_rhs` confirms the residual RHS
+         (RHS minus every sanitize(...) span) has no unmitigated source
+         or tainted variable. Otherwise taint propagates.
+    Conservative on paren-tracking loss = more findings, fewer FN."""
     tainted = set()
     for _ in range(6):
         changed = False
@@ -357,9 +463,17 @@ def compute_taint(lines, sources, msg_active, assign_re=ASSIGN):
             if not m:
                 continue
             lhs, rhs = m.group(1), m.group(2)
-            # cross-method sanitizer wrap -> do not propagate taint
-            if _SANITIZE_HINT.search(rhs):
+            # Tier 1: confirmed-safe library escaper -> hard-clear taint chain
+            if _KNOWN_SAFE_FUNCS.search(rhs):
                 continue
+            # Tier 2: sanitize-hint name match -> soft-clear only if the
+            # residual RHS (after stripping every sanitize(...) span) has
+            # no unmitigated source or tainted variable. Otherwise the
+            # sanitizer only covered part of the expression - taint flows.
+            if _SANITIZE_HINT.search(rhs):
+                if _sanitize_covers_rhs(rhs, sources, msg_active, tainted):
+                    continue
+                # else: fall through - propagate taint
             if source_hits(rhs, sources, msg_active) or any(
                 re.search(r'(?<!\w)' + re.escape(v) + r'\b', rhs) for v in tainted
             ):
