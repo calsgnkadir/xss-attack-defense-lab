@@ -18,6 +18,7 @@ assessment.
 | 08 | [What the bot doesn't shout about is what makes it useful](08-what-does-not-shout-matters.md) | Tooling / precision > recall | v3.5-v3.7 + Java: sink-context, dedup, PUT/PATCH/DELETE, Content-Type gate, Java/Servlet/Spring static |
 | 09 | [Three HIGH to one: a precision journey on real code](09-three-high-to-one-a-precision-journey.md) | Tooling / engineered heuristic | v3.8 + v3.9 case study on hotel-platform (own project): cross-method sanitizer + multi-line join + sink-family dedup walk static HIGH count from 3 → 2 → 1 |
 | 10 | [One shape was never enough: payload variants and WAF bypass](10-one-shape-was-never-enough.md) | Tooling / recall + precision | v3.10: five context-tuned payload variants (body / title-breakout / attr-breakout / script-breakout / url-scheme), variant-aware severity upgrade, four WAF-bypass mutations per variant, same flags in reflected + stored + header-probe modes |
+| 11 | [Four targets in one afternoon: what v3.10 actually did in the wild](11-four-targets-one-afternoon.md) | Tooling / field report | Live v3.10 run on four targets in one sitting: `hotel-platform` (JWT PUT, 25 shape → all `json-only`), `mahrem` (0 reflections), `wallet-api` (25 shape → all `json-only`), `Bludit 3.16.2` (body → `breakout-req`, title-breakout → **`executable`**, first live severity upgrade on record) |
 
 > Every writeup here is backed by hands-on work on an **authorized** target:
 > OWASP Juice Shop (local Docker) or, for the field writeup (02), authorized

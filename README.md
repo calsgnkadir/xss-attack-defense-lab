@@ -5,7 +5,8 @@ on OWASP Juice Shop, a **working XSS analysis bot** I wrote (`dxa` + `dxadyn` + 
 static + 10-flag dynamic + bridge, 5 payload variants × 4 WAF-bypass mutations, 101 tests, CI),
 **independent research on real third-party open-source software** that produced externally-validated
 results (a Broken-Access-Control vulnerability confirmed by Patchstack + a SQL-injection variant
-re-derived via patch-diffing that was published as a CVE), and **ten mechanism-first writeups**
+re-derived via patch-diffing that was published as a CVE), and **eleven mechanism-first writeups**
+(including a field report on v3.10 with the first live `executable` verdict on record)
 explaining the reasoning behind each class. The scope spans the **OWASP Top 10** — XSS
 (reflected/stored/DOM/mutation), SQL Injection, JWT / broken authentication, access control
 (IDOR/BOLA), CSP bypass — each attack paired with its defense.
@@ -47,8 +48,9 @@ step, not just paste a payload. The tool suite makes that methodology *runnable*
   a breakout marker that survived raw on HTML is scored `executable` not `breakout-req`), and the
   bridge `dxa2dyn` that feeds static HIGH hints into the dynamic probe. **101 pytest cases**,
   CI-gated, zero third-party dependencies.
-- **Writeups** — ten mechanism-first technical explainers (01-10), each tied to a confirmed finding
-  or a documented tool milestone; see [`writeups/`](writeups/).
+- **Writeups** — eleven mechanism-first technical explainers (01-11), each tied to a confirmed finding
+  or a documented tool milestone; see [`writeups/`](writeups/). Live raw HTML reports for the
+  four-target v3.10 field run are in [`reports/2026-09-26-v310-live/`](reports/2026-09-26-v310-live/).
 
 ---
 
@@ -219,11 +221,13 @@ xss-attack-defense-lab/
 │       ├── test_dxa.py + test_dxadyn.py + test_dxa2dyn.py   – 101 pytest cases (CI)
 │       └── README.md            – tool docs + capability matrix
 ├── research/          – Beyond the Lab: independent real-world research + externally-validated results
-├── writeups/          – 10 mechanism-first explainers (01: filtering, 02: DOM XSS in a React SPA,
+├── writeups/          – 11 mechanism-first explainers (01: filtering, 02: DOM XSS in a React SPA,
 │                        03: SQLi, 04: JWT, 05: IDOR/BOLA, 06: building the bot, 07: teaching the
 │                        bot to log in and shut up, 08: what the bot doesn't shout about matters,
 │                        09: three HIGH to one — precision journey, 10: one shape was never enough —
-│                        payload variants + WAF bypass)
+│                        payload variants + WAF bypass, 11: four targets in one afternoon — v3.10
+│                        field report with first live executable verdict)
+├── reports/           – raw HTML report artifacts from live tool runs referenced in writeups
 ├── screenshots/       – selected evidence captures (Burp, DevTools, Juice Shop)
 └── defense/           – written secure-coding defenses for every confirmed class
 ```
